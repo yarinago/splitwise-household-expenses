@@ -8,4 +8,4 @@ openpyxl>=3.1.0,<4.0
 python-dotenv>=0.19.0
 
 # Splitwise API SDK
-splitwise>=4.0.0
+splitwise>=3.0.0,<4.0
