@@ -55,7 +55,7 @@ jobs:
           attachments: splitwise_group_${{ vars.SPLITWISE_GROUP_ID }}_all_history.xlsx
 
       - name: Upload Excel file
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v6
         with:
           name: splitwise-export
           path: splitwise_group_*.xlsx
