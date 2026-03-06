@@ -3,8 +3,8 @@ name: Splitwise Export
 on:
   schedule:
     # Run every 2 weeks (1st and 15th of month at 2 AM UTC)
-    - cron: '0 2 1,15 * *'
-  workflow_dispatch:  # Allow manual triggering
+    - cron: "0 2 1,15 * *"
+  workflow_dispatch:
 
 jobs:
   export:
@@ -13,9 +13,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -23,7 +23,6 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run Splitwise export
-        id: export
         env:
           # GitHub Secrets (sensitive credentials - never commit)
           SPLITWISE_CLIENT_ID: ${{ secrets.SPLITWISE_CLIENT_ID }}
@@ -35,6 +34,7 @@ jobs:
           SPLITWISE_FIRST_MONTH: ${{ vars.SPLITWISE_FIRST_MONTH }}
           SPLITWISE_EXCLUDE_MONTHS: ${{ vars.SPLITWISE_EXCLUDE_MONTHS }}
           SPLITWISE_EXCLUDE_DESCRIPTIONS: ${{ vars.SPLITWISE_EXCLUDE_DESCRIPTIONS }}
+          SPLITWISE_DEBT_DIRECTION: ${{ vars.SPLITWISE_DEBT_DIRECTION }}
         run: python splitwise_to_excel.py
 
       - name: Send Excel file via email
@@ -45,17 +45,17 @@ jobs:
           server_port: 587
           username: ${{ secrets.EMAIL_FROM }}
           password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: 'Splitwise Export - ${{ steps.export.outputs.group_name }}'
+          subject: "Splitwise Export - Group ${{ vars.SPLITWISE_GROUP_ID }}"
           to: ${{ vars.SEND_TO_EMAIL }}
-          from: "SplitWise-Household-Expenses-App"
+          from: ${{ secrets.EMAIL_FROM }}
           body: |
-            Splitwise household expenses export for group "${{ steps.export.outputs.group_name }}" (ID: ${{ vars.SPLITWISE_GROUP_ID }}).
-            
+            Splitwise household expenses export for group ID: ${{ vars.SPLITWISE_GROUP_ID }}.
+
             Generated: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          attachments: splitwise_group_${{ vars.SPLITWISE_GROUP_ID }}_all_history.xlsx
+          attachments: splitwise_group_*.xlsx
 
       - name: Upload Excel file
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
           name: splitwise-export
           path: splitwise_group_*.xlsx
