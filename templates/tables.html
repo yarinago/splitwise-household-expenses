@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="60">
+  <title>Splitwise Tables</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f5f7;
+      --panel: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --accent: #0f766e;
+      --accent-soft: #ccfbf1;
+      --error-bg: #fee2e2;
+      --error-text: #991b1b;
+      --border: #e5e7eb;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      line-height: 1.45;
+    }
+
+    .container {
+      max-width: 1300px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+    }
+
+    .header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .title {
+      margin: 0;
+      font-size: 1.35rem;
+    }
+
+    .meta {
+      margin: 4px 0 0 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .nav {
+      display: inline-flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .tab {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 0.85rem;
+      text-decoration: none;
+      color: var(--text);
+      background: #fff;
+    }
+
+    .tab.active {
+      background: var(--accent-soft);
+      border-color: #5eead4;
+      color: #134e4a;
+      font-weight: 600;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      background: #ecfeff;
+      color: #115e59;
+    }
+
+    .actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    button,
+    select,
+    input {
+      border-radius: 8px;
+      font-size: 0.9rem;
+      padding: 7px 10px;
+    }
+
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: 0;
+      cursor: pointer;
+    }
+
+    select,
+    input {
+      border: 1px solid var(--border);
+      background: #fff;
+    }
+
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-top: 10px;
+    }
+
+    .error {
+      background: var(--error-bg);
+      color: var(--error-text);
+      border: 1px solid #fecaca;
+      border-radius: 8px;
+      padding: 10px;
+      margin-top: 10px;
+      white-space: pre-wrap;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      min-width: 760px;
+      font-size: 0.87rem;
+      background: #fff;
+    }
+
+    th,
+    td {
+      border: 1px solid var(--border);
+      padding: 6px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #f8fafc;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+  </style>
+</head>
+<body>
+  {% macro render_table(table) -%}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          {% for col in table.columns %}
+          <th>{{ col }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in table.rows %}
+        <tr>
+          {% for col in table.columns %}
+          {% if col in table.money_columns %}
+          <td>{{ row.get(col, 0) | ils }}</td>
+          {% else %}
+          <td>{{ row.get(col, "") }}</td>
+          {% endif %}
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {%- endmacro %}
+
+  {% set snapshot = model.snapshot %}
+  <div class="container">
+    <section class="panel">
+      <div class="header">
+        <div>
+          <h1 class="title">Splitwise Tables</h1>
+          {% if snapshot %}
+          <p class="meta">
+            Group: <strong>{{ snapshot.group_name }}</strong> ({{ snapshot.group_id }}) |
+            Last dataset build: {{ snapshot.generated_at }}
+          </p>
+          {% else %}
+          <p class="meta">Waiting for first successful refresh.</p>
+          {% endif %}
+          <p class="meta">
+            Last refresh start: {{ model.last_refresh_started or "n/a" }} |
+            Last refresh end: {{ model.last_refresh_finished or "n/a" }} |
+            Auto refresh interval: {{ model.refresh_seconds }}s
+          </p>
+          <div class="nav">
+            <a class="tab" href="{{ url_for('index', month=view.selected_month if view else 'all') }}">Dashboard</a>
+            <a class="tab active" href="{{ url_for('tables', month=view.selected_month if view else 'all') }}">Tables</a>
+          </div>
+        </div>
+        <div class="actions">
+          <span class="status">Status: {{ model.status }}</span>
+          <form method="post" action="{{ url_for('refresh') }}">
+            <input type="hidden" name="next" value="{{ request.full_path if request.query_string else request.path }}">
+            <button type="submit">Refresh now</button>
+          </form>
+        </div>
+      </div>
+      {% if model.last_error %}
+      <div class="error">Last refresh error: {{ model.last_error }}</div>
+      {% endif %}
+      {% if view %}
+      <form class="filters" method="get" action="{{ url_for('tables') }}">
+        <label for="month">Month:</label>
+        <select id="month" name="month">
+          <option value="all" {% if view.selected_month == 'all' %}selected{% endif %}>All months</option>
+          {% for month in view.months %}
+          <option value="{{ month }}" {% if view.selected_month == month %}selected{% endif %}>{{ month }}</option>
+          {% endfor %}
+        </select>
+        <label for="q">Search:</label>
+        <input id="q" name="q" type="text" value="{{ view.query }}" placeholder="description/category/id">
+        <button type="submit">Apply</button>
+      </form>
+      {% endif %}
+    </section>
+
+    {% if view %}
+    <section class="panel">
+      <h2>All Data Summary</h2>
+      <p class="meta">
+        Total expenses: {{ snapshot.summary.total_expenses | ils }} |
+        Expense rows: {{ snapshot.summary.expense_count }} |
+        Currencies: {{ snapshot.summary.currencies|join(', ') if snapshot.summary.currencies else 'n/a' }}
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>Raw Expenses</h2>
+      <p class="meta">Showing {{ view.raw_shown }} of {{ view.raw_total }} rows (limit {{ view.table_limit }}).</p>
+      {{ render_table(view.raw) }}
+    </section>
+
+    <section class="panel">
+      <h2>Monthly By Category</h2>
+      {{ render_table(view.monthly) }}
+    </section>
+
+    <section class="panel">
+      <h2>Per Person By Month</h2>
+      {{ render_table(view.person) }}
+    </section>
+    {% endif %}
+  </div>
+</body>
+</html>

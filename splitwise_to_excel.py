@@ -32,6 +32,13 @@ OPTIONAL (GitHub Variables):
   SPLITWISE_FIRST_MONTH          Start month for history (default: 2008-01)
   SPLITWISE_EXCLUDE_MONTHS       Months to exclude (CSV, e.g., 2025-10,2025-11)
   SPLITWISE_EXCLUDE_DESCRIPTIONS Description patterns to exclude (CSV, case-insensitive)
+  SEND_TO_EMAIL                  Recipients for export email (CSV)
+  SMTP_SERVER                    SMTP host (default: smtp.gmail.com)
+  SMTP_PORT                      SMTP port (default: 587)
+
+OPTIONAL (GitHub Secrets, if email is enabled):
+  EMAIL_FROM                     SMTP username/from address
+  EMAIL_PASSWORD                 SMTP password/app password
 
 See README.md for detailed setup instructions.
 Hebrew is fully supported in descriptions, categories, and names.
@@ -42,7 +49,10 @@ import argparse
 import datetime as dt
 import json
 import os
+import smtplib
 import sys
+import time
+from email.message import EmailMessage
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
@@ -237,6 +247,7 @@ def normalize_person_shares(expenses: Iterable[Expense]) -> pd.DataFrame:
         for u in users:
             uid = None
             owed = None
+            paid = None
             display_name = None
 
             # If dict-like
@@ -245,6 +256,7 @@ def normalize_person_shares(expenses: Iterable[Expense]) -> pd.DataFrame:
                 if uid is None and isinstance(u.get("user"), dict):
                     uid = u["user"].get("id")
                 owed = u.get("owed_share") or u.get("owedShare") or u.get("owed")
+                paid = u.get("paid_share") or u.get("paidShare") or u.get("paid")
                 display_name = (u.get("user") or {}).get("first_name")
             else:
                 # SDK object path(s)
@@ -286,6 +298,13 @@ def normalize_person_shares(expenses: Iterable[Expense]) -> pd.DataFrame:
                     if val is not None:
                         owed = val
                         break
+                for attr in ("getPaidShare", "paid_share", "paidShare", "getPaid"):
+                    val = getattr(u, attr, None)
+                    if callable(val):
+                        val = val()
+                    if val is not None:
+                        paid = val
+                        break
 
             # Fallback: if still no name, try direct first-name on u
             if not display_name and not isinstance(u, dict):
@@ -299,6 +318,7 @@ def normalize_person_shares(expenses: Iterable[Expense]) -> pd.DataFrame:
 
             uid = int(uid) if uid is not None else None
             owed_val = _coerce_float(owed, 0.0)
+            paid_val = _coerce_float(paid, 0.0)
             # map to your fixed display names if possible
             name = MEMBER_ID_TO_NAME.get(uid, display_name if display_name else (str(uid) if uid is not None else "Unknown"))
 
@@ -308,6 +328,7 @@ def normalize_person_shares(expenses: Iterable[Expense]) -> pd.DataFrame:
                 "person": str(name) if name is not None else "Unknown",
                 "month": month,
                 "owed_share": owed_val,
+                "paid_share": paid_val,
             })
 
     df = pd.DataFrame(rows)
@@ -319,6 +340,8 @@ def normalize_person_shares(expenses: Iterable[Expense]) -> pd.DataFrame:
     if "user_id" in df.columns:
         df["user_id"] = pd.to_numeric(df["user_id"], errors="coerce").astype("Int64")
     df["owed_share"] = pd.to_numeric(df["owed_share"], errors="coerce").fillna(0.0)
+    if "paid_share" in df.columns:
+        df["paid_share"] = pd.to_numeric(df["paid_share"], errors="coerce").fillna(0.0)
     return df
     df = df[df["month"].notna()].copy()
     if "expense_id" in df.columns:
@@ -1083,6 +1106,93 @@ def resolve_token(token_arg: Optional[str]) -> Dict:
         raise SystemExit("[!] Could not parse token JSON. If in a file, pass @/path/to/token.json")
 
 
+def _parse_csv_values(raw: str) -> List[str]:
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def _normalize_version_label(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw:
+        return "unknown"
+    safe_chars = []
+    for ch in raw:
+        if ch.isalnum() or ch in (".", "_", "-"):
+            safe_chars.append(ch)
+        else:
+            safe_chars.append("-")
+    normalized = "".join(safe_chars).strip("-")
+    return normalized or "unknown"
+
+
+def _append_version_to_filename(path: str, version_label: str) -> str:
+    base, ext = os.path.splitext(path)
+    suffix = f"_v{version_label}"
+    if base.endswith(suffix):
+        return path
+    if not ext:
+        ext = ".xlsx"
+    return f"{base}{suffix}{ext}"
+
+
+def send_export_email_if_configured(out_path: str, group_name: str, group_id: int, version_label: str) -> None:
+    send_to_raw = os.getenv("SEND_TO_EMAIL", "").strip()
+    if not send_to_raw:
+        return
+
+    recipients = _parse_csv_values(send_to_raw)
+    if not recipients:
+        raise SystemExit("[!] SEND_TO_EMAIL was provided but no valid recipients were found.")
+
+    email_from = os.getenv("EMAIL_FROM", "").strip()
+    email_password = os.getenv("EMAIL_PASSWORD", "").strip()
+    if not email_from or not email_password:
+        raise SystemExit("[!] SEND_TO_EMAIL is set but EMAIL_FROM or EMAIL_PASSWORD is missing.")
+
+    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com").strip() or "smtp.gmail.com"
+    smtp_port_raw = os.getenv("SMTP_PORT", "587").strip() or "587"
+    try:
+        smtp_port = int(smtp_port_raw)
+    except ValueError:
+        raise SystemExit(f"[!] Invalid SMTP_PORT value: {smtp_port_raw}")
+
+    subject = os.getenv("EMAIL_SUBJECT", f"Splitwise Export v{version_label} - {group_name}")
+    body = os.getenv(
+        "EMAIL_BODY",
+        (
+            f'Splitwise household expenses export for group "{group_name}" (ID: {group_id}).\n'
+            f"Version: {version_label}\n"
+            f"File: {os.path.basename(out_path)}"
+        ),
+    )
+
+    with open(out_path, "rb") as f:
+        attachment = f.read()
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = email_from
+    msg["To"] = ", ".join(recipients)
+    msg.set_content(body)
+    msg.add_attachment(
+        attachment,
+        maintype="application",
+        subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=os.path.basename(out_path),
+    )
+
+    try:
+        with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
+            smtp.login(email_from, email_password)
+            smtp.send_message(msg)
+    except Exception as e:
+        raise SystemExit(f"[!] Failed to send export email: {e}")
+
+    print(f"Email sent to: {', '.join(recipients)}")
+
+
 def main():
     load_dotenv()
     args = parse_args()
@@ -1093,7 +1203,9 @@ def main():
     group_id = args.group_id or DEFAULT_GROUP_ID
     start_ym = args.start or FIRST_MONTH
     end_ym = args.end or ym_today()
-    out_path = args.out or OUTPUT_FILE_TEMPLATE.format(group_id=group_id)
+    version_label = _normalize_version_label(os.getenv("EXPORT_VERSION", "unknown"))
+    out_path_raw = args.out or OUTPUT_FILE_TEMPLATE.format(group_id=group_id)
+    out_path = _append_version_to_filename(out_path_raw, version_label)
 
     client_id = os.getenv("SPLITWISE_CLIENT_ID")
     client_secret = os.getenv("SPLITWISE_CLIENT_SECRET")
@@ -1157,6 +1269,7 @@ def main():
     # Write workbook (Raw_Shares optional)
     shares_out = None if args.no_raw_shares else person_rows_df
     write_excel(out_path, raw_wide, pivot, mom, person_pivot, shares_out)
+    send_export_email_if_configured(out_path, group.getName(), group_id, version_label)
 
     print(f"✅ Export complete → {out_path}")
     if not raw_wide.empty and raw_wide.get("currency", pd.Series()).nunique() > 1:

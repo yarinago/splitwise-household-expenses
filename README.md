@@ -1,160 +1,136 @@
 # splitwise-household-expenses
 
-This project connects with a Splitwise group and exports expense data to an Excel file with dashboard-like reporting.
+Splitwise household dashboard service.
 
-## Quick Setup
+The app now runs as a web service that computes Splitwise data in the background and serves:
+- HTML dashboard: `/`
+- Tables screen: `/tables`
+- JSON API: `/api/dashboard`
+- Health probes: `/healthz`, `/readyz`
 
-### 1. GitHub Secrets (Sensitive Credentials)
+## Local Run
 
-These must be stored as **GitHub Secrets** (never commit to repository):
-
-1. Go to **Settings → Secrets and variables → Actions**
-2. Click **"New repository secret"** and create each:
-
-| Secret Name | Value | How to Get |
-|-------------|-------|-----------|
-| `SPLITWISE_CLIENT_ID` | Your OAuth2 client ID | [Splitwise Settings → OAuth](https://www.splitwise.com/oauth_clients) |
-| `SPLITWISE_CLIENT_SECRET` | Your OAuth2 client secret | [Splitwise Settings → OAuth](https://www.splitwise.com/oauth_clients) |
-| `SPLITWISE_ACCESS_TOKEN_JSON` | OAuth token JSON | Generate via OAuth flow or use existing token |
-| `EMAIL_FROM` | Your Gmail address (sender) | Your Gmail account |
-| `EMAIL_PASSWORD` | Gmail app password | [Create app password](https://myaccount.google.com/apppasswords) |
-
-**Token JSON format:**
-```json
-{"access_token":"your_token","token_type":"bearer","refresh_token":"your_refresh_token"}
-```
-
-### 2. GitHub Variables (Public Configuration)
-
-These can be shared/version-controlled. Set them as **GitHub Variables**:
-
-1. Go to **Settings → Secrets and variables → Actions**
-2. Click **"New repository variable"** and create each:
-
-| Variable | Value | Required | Example |
-|----------|-------|----------|---------|
-| `SPLITWISE_GROUP_ID` | Your group ID | ✅ Yes | `12345678` |
-| `SPLITWISE_MEMBERS` | JSON user mapping | ✅ Yes | `{"98765432": "Ally", "12312312": "Bob"}` |
-| `SPLITWISE_FIRST_MONTH` | Start month | ❌ No | `2008-01` (default) |
-| `SPLITWISE_EXCLUDE_MONTHS` | Months to exclude | ❌ No | `2026-01,2026-02` |
-| `SPLITWISE_EXCLUDE_DESCRIPTIONS` | Description patterns | ❌ No | `Paris,trip` |
-| `SEND_TO_EMAIL` | Recipients for email export | ❌ No | `user@gmail.com` or `user1@gmail.com,user2@gmail.com` |
-
-**How to find your Group ID:**
-- Open your Splitwise group
-- URL: `https://splitwise.com/groups/12345678` → group ID is `12345678`
-
-**How to create the MEMBERS JSON:**
-- Find user IDs in your group settings or by inspecting Splitwise URLs
-- Format: `{"user_id_1": "Display Name 1", "user_id_2": "Display Name 2"}`
-
-### 3. Local Development
-
-For testing locally without committing secrets:
-
-1. Create a `.env` file (Git-ignored):
-```bash
-# .env (DO NOT COMMIT - already in .gitignore)
-SPLITWISE_CLIENT_ID=your_client_id
-SPLITWISE_CLIENT_SECRET=your_client_secret
-SPLITWISE_ACCESS_TOKEN_JSON={"access_token":"...","token_type":"bearer","refresh_token":"..."}
-SPLITWISE_GROUP_ID=12345678
-SPLITWISE_MEMBERS={"98765432": "Ally", "12312312": "Bob"}
-SPLITWISE_FIRST_MONTH=2008-01
-SPLITWISE_EXCLUDE_MONTHS=2026-01,2026-02
-SPLITWISE_EXCLUDE_DESCRIPTIONS=Paris
-EMAIL_FROM=your-email@gmail.com
-EMAIL_PASSWORD=your_gmail_app_password
-```
-
-2. Install and run:
+1. Install dependencies:
 ```bash
 pip install -r requirements.txt
-python splitwise_to_excel.py
 ```
 
-## Usage
-
-### Run locally:
+2. Provide env vars (for example via `.env`):
 ```bash
-python splitwise_to_excel.py
+SPLITWISE_CLIENT_ID=...
+SPLITWISE_CLIENT_SECRET=...
+SPLITWISE_ACCESS_TOKEN_JSON={"access_token":"...","token_type":"bearer","refresh_token":"..."}
+SPLITWISE_GROUP_ID=12345678
+SPLITWISE_MEMBERS={"98765432":"Ally","12312312":"Bob"}
+SPLITWISE_FIRST_MONTH=2008-01
+SPLITWISE_EXCLUDE_MONTHS=
+SPLITWISE_EXCLUDE_DESCRIPTIONS=
+SPLITWISE_REFRESH_SECONDS=900
+PORT=8080
 ```
 
-### With custom arguments:
+3. Run the web app:
 ```bash
-python splitwise_to_excel.py \
-  --group-id 12345678 \
-  --start 2008-01 \
-  --end 2026-02 \
-  --out my_expenses.xlsx
+python web_app.py
 ```
 
-### Run via GitHub Actions:
-Push to the repository. The workflow at `.github/workflows/splitwise-export.yml` automatically:
-- Runs every 2 weeks (1st and 15th of the month at 2 AM UTC)
-- Reads secrets from GitHub (injected at runtime)
-- Reads variables from GitHub
-- Generates Excel export
-- Sends export via email (if `SEND_TO_EMAIL` variable is configured)
-- Uploads as artifact
+4. Open:
+```text
+http://localhost:8080
+```
 
-To run manually: Go to **Actions → Splitwise Export → Run workflow**
+## Background Compute Model
 
-### Email Configuration (Optional)
+- A background thread refreshes data every `SPLITWISE_REFRESH_SECONDS` (default `900`).
+- Latest successful snapshot is cached in memory.
+- Web requests read cached snapshot only; they do not call Splitwise directly.
+- `POST /refresh` and `POST /api/refresh` trigger manual refresh.
+- Dashboard has a 2x2 graph layout with:
+  - month totals (chronological)
+  - category totals (month filter)
+  - per-person owes (month scope)
+  - category-over-time (category selector)
+- Category bars use distinct colors.
+- Tables and full-data summary are split into a dedicated `/tables` page with month and text filters.
 
-To receive the export file via email (Gmail):
+## CI Image Build
 
-1. Set these as **GitHub Secrets**:
-   - `EMAIL_FROM` - Your Gmail address
-   - `EMAIL_PASSWORD` - [Create an app password](https://myaccount.google.com/apppasswords) in your Google Account
+Workflow: `.github/workflows/splitwise-export.yml`
 
-2. Set this as a **GitHub Variable**:
-   - `SEND_TO_EMAIL` - Recipients (comma-separated, e.g., `user1@gmail.com,user2@gmail.com`)
+- Builds Docker image from `Dockerfile`
+- Pushes `latest` on `main` (dev track)
+- Pushes `release-vprod` and a release tag when pushing Git tags matching `release/v*prod` (prod track)
+- Runs build-only on pull requests
 
-The workflow uses Gmail's SMTP server automatically (smtp.gmail.com:587).
+## Kubernetes Layout
 
-## Configuration Reference
+- `k8s/base`: shared manifests (`Deployment` + `Service`)
+- `k8s/overlays/dev`: development overrides
+- `k8s/overlays/prod`: production overrides
+- `k8s/base/secret.example.yaml`: template for required secret keys
 
-All settings are environment variables (see [.env.example](.env.example)):
+Render test:
+```bash
+kubectl kustomize k8s/overlays/prod
+kubectl kustomize k8s/overlays/dev
+```
 
-### Required (Secrets)
-- `SPLITWISE_CLIENT_ID` - OAuth2 client ID
-- `SPLITWISE_CLIENT_SECRET` - OAuth2 client secret
-- `SPLITWISE_ACCESS_TOKEN_JSON` - OAuth2 token JSON
+## Argo CD: App-Of-Apps + ApplicationSet
 
-### Optional (Secrets - for Email)
-- `EMAIL_FROM` - Your Gmail address (required for email export)
-- `EMAIL_PASSWORD` - Gmail app password (required for email export)
+This repo contains:
+- `argocd/splitwise-export-applicationset.yaml`
 
-### Required (Variables)
-- `SPLITWISE_GROUP_ID` - Splitwise group ID
-- `SPLITWISE_MEMBERS` - JSON map `{"user_id": "name", ...}`
+That `ApplicationSet` generates child Argo `Application` resources for `dev`
+and `prod`, each pointing to its matching overlay path.
 
-### Optional (Variables)
-- `SPLITWISE_FIRST_MONTH` - Start month (default: `2008-01`, format: `YYYY-MM`)
-- `SPLITWISE_EXCLUDE_MONTHS` - Months to exclude (CSV, e.g., `2026-01,2026-02`)
-- `SPLITWISE_EXCLUDE_DESCRIPTIONS` - Description patterns to exclude (CSV, case-insensitive, e.g., `Paris,trip`)
-- `SEND_TO_EMAIL` - Email recipients for export (CSV, e.g., `user1@gmail.com,user2@gmail.com`)
+In your other repo (the one that runs Argo app-of-apps), create a parent `Application` that syncs this repo's `argocd` path:
 
-## Output
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: splitwise-export-bootstrap
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/yarinago/splitwise-household-expenses.git
+    targetRevision: main
+    path: argocd
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
 
-Generates an Excel file with:
-- **Raw_Expenses** - All expenses with per-person amount columns
-- **Raw_Shares** - Long-form expense-person relationships
-- **Monthly_By_Category** - Monthly category totals
-- **PerPerson_Month** - Per-person monthly totals
-- **Charts** - Interactive dashboard with tiles and charts
+## Runtime Config Sync (Automated)
 
-## Security Notes
+Workflow: `.github/workflows/sync-runtime-config.yml`
 
-✅ **DO:**
-- Store credentials as GitHub Secrets
-- Store configuration as GitHub Variables
-- Keep `.env` files Git-ignored for local dev
-- Regenerate tokens if accidentally leaked
+What it does:
+- Reads one shared set of GitHub Variables and Secrets
+- Creates/updates `ConfigMap/splitwise-export-config` in each namespace
+- Creates/updates `Secret/splitwise-export-secrets` in each namespace
+- Applies the same runtime config to both `dev` and `prod` (version differences come from image tags and overlay patch values)
 
-✅ **DON'T:**
-- Commit `.env` files or credentials to Git
-- Share secrets in issues or PRs
-- Hardcode credentials in Python files
-- Use the same token across machines
+Required GitHub Variables (shared):
+- `SPLITWISE_GROUP_ID`
+- `SPLITWISE_MEMBERS`
+- `SPLITWISE_FIRST_MONTH` (optional, defaults to `2008-01`)
+- `SPLITWISE_EXCLUDE_MONTHS` (optional)
+- `SPLITWISE_EXCLUDE_DESCRIPTIONS` (optional)
+- `SPLITWISE_REFRESH_SECONDS` (optional, defaults to `900`)
+- `SPLITWISE_NAMESPACE_DEV` (optional override, default `splitwise-dev`)
+- `SPLITWISE_NAMESPACE_PROD` (optional override, default `splitwise`)
+
+Required GitHub Secrets (shared):
+- `SPLITWISE_CLIENT_ID`
+- `SPLITWISE_CLIENT_SECRET`
+- `SPLITWISE_ACCESS_TOKEN_JSON`
+
+## Legacy Excel Export
+
+`splitwise_to_excel.py` is still in the repo for backward compatibility and can still generate workbook output if you run it directly.
