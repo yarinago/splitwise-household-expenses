@@ -12,3 +12,4 @@ splitwise>=3.0.0,<4.0
 
 # Web app
 Flask>=3.0.0,<4.0
+gunicorn>=22.0.0,<24.0

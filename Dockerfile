@@ -1,8 +1,10 @@
 FROM python:3.11-slim
 
+ARG APP_VERSION=unknown
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PORT=8080
+    PORT=8080 \
+    APP_VERSION=${APP_VERSION}
 
 WORKDIR /app
 
@@ -15,4 +17,4 @@ COPY templates ./templates
 
 EXPOSE 8080
 
-ENTRYPOINT ["python", "web_app.py"]
+ENTRYPOINT ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-8080} --workers ${GUNICORN_WORKERS:-1} --threads ${GUNICORN_THREADS:-4} --timeout ${GUNICORN_TIMEOUT:-120} web_app:app"]

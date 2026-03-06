@@ -14,10 +14,30 @@ import pandas as pd
 from dotenv import load_dotenv
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
-# Load .env before importing the compute module because it validates env vars at import time.
-load_dotenv()
-
 import splitwise_to_excel as core
+
+
+def should_load_dotenv() -> bool:
+    raw = (os.getenv("SPLITWISE_LOAD_DOTENV", "1") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def load_runtime_env() -> None:
+    # Local developer convenience; CI/K8s/ArgoCD can disable this with SPLITWISE_LOAD_DOTENV=0.
+    if should_load_dotenv():
+        load_dotenv(override=False)
+    core.refresh_runtime_config(load_env=False, require_members=False)
+
+
+def resolve_app_version() -> str:
+    return (
+        (os.getenv("APP_VERSION") or "").strip()
+        or (os.getenv("EXPORT_VERSION") or "").strip()
+        or "unknown"
+    )
+
+
+load_runtime_env()
 
 
 def utc_now_iso() -> str:
@@ -94,8 +114,27 @@ def extract_simplified_debts(group) -> List[Any]:
     return debts or []
 
 
+def debt_direction_mode() -> str:
+    mode = (os.getenv("SPLITWISE_DEBT_DIRECTION", "reverse") or "reverse").strip().lower()
+    if mode not in {"normal", "reverse"}:
+        return "reverse"
+    return mode
+
+
+def person_owes_direction_mode() -> str:
+    # Optional override for person-share based owes calculations.
+    mode = (
+        (os.getenv("SPLITWISE_PERSON_OWES_DIRECTION") or "").strip().lower()
+        or debt_direction_mode()
+    )
+    if mode not in {"normal", "reverse"}:
+        return "reverse"
+    return mode
+
+
 def build_debt_edges(group, id_to_name: Dict[int, str]) -> List[Dict[str, Any]]:
     edges: List[Dict[str, Any]] = []
+    direction = debt_direction_mode()
     for debt in extract_simplified_debts(group):
         if isinstance(debt, dict):
             from_raw = debt.get("from") or debt.get("from_user") or debt.get("from_user_id")
@@ -117,10 +156,12 @@ def build_debt_edges(group, id_to_name: Dict[int, str]) -> List[Dict[str, Any]]:
             else:
                 amount_raw = core._safe_attr(debt, "getAmount")
 
-        # Splitwise SDK response direction appears opposite in this setup;
-        # flip direction so UI text "X owes Y" matches observed balances.
-        from_id = resolve_user_id(to_raw)
-        to_id = resolve_user_id(from_raw)
+        if direction == "reverse":
+            from_id = resolve_user_id(to_raw)
+            to_id = resolve_user_id(from_raw)
+        else:
+            from_id = resolve_user_id(from_raw)
+            to_id = resolve_user_id(to_raw)
         amount = round(coerce_float(amount_raw), 2)
         if amount <= 0:
             continue
@@ -178,7 +219,12 @@ def build_person_month_owes_pivot(person_df: pd.DataFrame, id_to_name: Dict[int,
         df["paid_share"] = 0.0
 
     # Net amount this person still owes on each expense.
-    df["net_owes"] = (df["owed_share"] - df["paid_share"]).clip(lower=0.0)
+    # In this setup, share direction may be inverted relative to Splitwise docs.
+    share_mode = person_owes_direction_mode()
+    if share_mode == "reverse":
+        df["net_owes"] = (df["paid_share"] - df["owed_share"]).clip(lower=0.0)
+    else:
+        df["net_owes"] = (df["owed_share"] - df["paid_share"]).clip(lower=0.0)
     df["person"] = df.apply(
         lambda r: id_to_name.get(int(r["user_id"]) if pd.notna(r["user_id"]) else -1, r.get("person", "Unknown")),
         axis=1,
@@ -200,7 +246,67 @@ def build_person_month_owes_pivot(person_df: pd.DataFrame, id_to_name: Dict[int,
     return pivot
 
 
+def build_raw_with_member_owes(
+    raw_df: pd.DataFrame, shares_df: pd.DataFrame, id_to_name: Dict[int, str]
+) -> pd.DataFrame:
+    out = raw_df.copy()
+    cols_to_drop: List[str] = []
+    for display_name in id_to_name.values():
+        for base in (f"{display_name}_owes", f"{display_name}_owed", f"{display_name}_paid"):
+            for cand in (base, f"{base}_x", f"{base}_y"):
+                if cand in out.columns:
+                    cols_to_drop.append(cand)
+    if cols_to_drop:
+        out.drop(columns=list(set(cols_to_drop)), inplace=True, errors="ignore")
+
+    if out.empty or shares_df.empty:
+        for display_name in id_to_name.values():
+            base = f"{display_name}_owes"
+            if base not in out.columns:
+                out[base] = 0.0
+        return out
+
+    shares = shares_df.copy()
+    shares["owed_share"] = pd.to_numeric(shares.get("owed_share"), errors="coerce").fillna(0.0)
+    shares["paid_share"] = pd.to_numeric(shares.get("paid_share"), errors="coerce").fillna(0.0)
+    wanted_ids = list(id_to_name.keys())
+    shares = shares[shares["user_id"].isin(wanted_ids)].copy()
+    if shares.empty:
+        for display_name in id_to_name.values():
+            base = f"{display_name}_owes"
+            if base not in out.columns:
+                out[base] = 0.0
+        return out
+
+    if person_owes_direction_mode() == "reverse":
+        shares["net_owes"] = (shares["paid_share"] - shares["owed_share"]).clip(lower=0.0)
+    else:
+        shares["net_owes"] = (shares["owed_share"] - shares["paid_share"]).clip(lower=0.0)
+
+    piv = shares.pivot_table(
+        index="expense_id",
+        columns="user_id",
+        values="net_owes",
+        aggfunc="sum",
+        fill_value=0.0,
+    )
+    piv = piv.reindex(columns=wanted_ids, fill_value=0.0)
+    piv.columns = [f"{id_to_name.get(int(uid), str(uid))}_owes" for uid in piv.columns]
+
+    out = out.merge(piv.reset_index(), on="expense_id", how="left")
+    for display_name in id_to_name.values():
+        base = f"{display_name}_owes"
+        if base not in out.columns:
+            out[base] = 0.0
+        out[base] = pd.to_numeric(out[base], errors="coerce").fillna(0.0).round(2)
+    return out
+
+
 def build_dashboard_snapshot(max_recent_rows: int) -> Dict[str, Any]:
+    core.refresh_runtime_config(load_env=False, require_members=False)
+    if not core.MEMBER_ID_TO_NAME:
+        raise RuntimeError("SPLITWISE_MEMBERS is required.")
+
     group_id = core.DEFAULT_GROUP_ID or int(os.getenv("SPLITWISE_GROUP_ID", "0") or "0")
     if not group_id:
         raise RuntimeError("SPLITWISE_GROUP_ID is required.")
@@ -215,9 +321,15 @@ def build_dashboard_snapshot(max_recent_rows: int) -> Dict[str, Any]:
 
     start_ym = (os.getenv("SPLITWISE_FIRST_MONTH", core.FIRST_MONTH) or "2008-01").strip()
     end_ym = core.ym_today()
-    token = core.resolve_token(token_raw)
+    try:
+        token = core.resolve_token(token_raw)
+    except SystemExit as exc:
+        raise RuntimeError(str(exc)) from exc
 
-    sw = core.make_client(client_id, client_secret, token)
+    try:
+        sw = core.make_client(client_id, client_secret, token)
+    except SystemExit as exc:
+        raise RuntimeError(str(exc)) from exc
     group = core.fetch_group(sw, group_id)
     group_name = group.getName()
 
@@ -225,7 +337,7 @@ def build_dashboard_snapshot(max_recent_rows: int) -> Dict[str, Any]:
     raw_df = core.normalize_expenses(expenses)
     shares_df = core.normalize_person_shares(expenses)
     raw_df, shares_df = core.apply_custom_exclusions(raw_df, shares_df)
-    raw_wide = core.widen_raw_with_member_owed(raw_df, shares_df, core.MEMBER_ID_TO_NAME)
+    raw_wide = build_raw_with_member_owes(raw_df, shares_df, core.MEMBER_ID_TO_NAME)
     monthly_by_category, _ = core.build_pivots(raw_wide)
     per_person_month = build_person_month_owes_pivot(shares_df, core.MEMBER_ID_TO_NAME)
 
@@ -682,9 +794,19 @@ class DashboardState:
 REFRESH_SECONDS = int_env("SPLITWISE_REFRESH_SECONDS", default=900, minimum=30)
 MAX_RECENT_ROWS = int_env("SPLITWISE_RECENT_EXPENSES_LIMIT", default=30, minimum=5)
 TABLE_LIMIT = int_env("SPLITWISE_TABLE_LIMIT", default=500, minimum=50)
+APP_VERSION = resolve_app_version()
 
-state = DashboardState(refresh_seconds=REFRESH_SECONDS, max_recent_rows=MAX_RECENT_ROWS)
-state.start()
+_state_lock = threading.Lock()
+_state: Optional[DashboardState] = None
+
+
+def get_state() -> DashboardState:
+    global _state
+    with _state_lock:
+        if _state is None:
+            _state = DashboardState(refresh_seconds=REFRESH_SECONDS, max_recent_rows=MAX_RECENT_ROWS)
+            _state.start()
+        return _state
 
 app = Flask(__name__)
 
@@ -694,9 +816,14 @@ def ils_filter(value: Any) -> str:
     return format_ils(value)
 
 
+@app.context_processor
+def inject_app_globals() -> Dict[str, Any]:
+    return {"app_version": APP_VERSION}
+
+
 @app.get("/")
 def index():
-    model = state.model()
+    model = get_state().model()
     snapshot = model["snapshot"]
     view = None
     if snapshot is not None:
@@ -714,7 +841,7 @@ def index():
 
 @app.get("/tables")
 def tables():
-    model = state.model()
+    model = get_state().model()
     snapshot = model["snapshot"]
     view = None
     if snapshot is not None:
@@ -742,20 +869,20 @@ def next_redirect_target(default_endpoint: str) -> str:
 
 @app.post("/refresh")
 def refresh():
-    state.trigger_refresh_async()
+    get_state().trigger_refresh_async()
     return redirect(next_redirect_target("index"))
 
 
 @app.get("/api/dashboard")
 def api_dashboard():
-    model = state.model()
+    model = get_state().model()
     status_code = 200 if model["snapshot"] is not None else 503
     return jsonify(model), status_code
 
 
 @app.post("/api/refresh")
 def api_refresh():
-    scheduled = state.trigger_refresh_async()
+    scheduled = get_state().trigger_refresh_async()
     return jsonify({"scheduled": scheduled, "timestamp": utc_now_iso()}), (202 if scheduled else 409)
 
 
@@ -766,13 +893,14 @@ def healthz():
 
 @app.get("/readyz")
 def readyz():
-    model = state.model()
+    model = get_state().model()
     if model["snapshot"] is None:
         return jsonify({"status": "not_ready", "last_error": model["last_error"]}), 503
     return jsonify({"status": "ready", "last_refresh_finished": model["last_refresh_finished"]})
 
 
 if __name__ == "__main__":
+    get_state()
     host = os.getenv("SPLITWISE_APP_HOST", "0.0.0.0").strip() or "0.0.0.0"
     port = int_env("PORT", default=8080, minimum=1)
     app.run(host=host, port=port)

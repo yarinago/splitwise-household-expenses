@@ -15,7 +15,7 @@ The app now runs as a web service that computes Splitwise data in the background
 pip install -r requirements.txt
 ```
 
-2. Provide env vars (for example via `.env`):
+2. Provide env vars (for example via `.env` for local testing only):
 ```bash
 SPLITWISE_CLIENT_ID=...
 SPLITWISE_CLIENT_SECRET=...
@@ -26,8 +26,13 @@ SPLITWISE_FIRST_MONTH=2008-01
 SPLITWISE_EXCLUDE_MONTHS=
 SPLITWISE_EXCLUDE_DESCRIPTIONS=
 SPLITWISE_REFRESH_SECONDS=900
+SPLITWISE_DEBT_DIRECTION=reverse
+APP_VERSION=local
+SPLITWISE_LOAD_DOTENV=1
 PORT=8080
 ```
+
+`.env` is optional and intended for local development. In GitHub Actions / Kubernetes / ArgoCD, values should come from repo variables/secrets and runtime ConfigMap/Secret injection.
 
 3. Run the web app:
 ```bash
@@ -51,6 +56,7 @@ http://localhost:8080
   - per-person owes (month scope)
   - category-over-time (category selector)
 - Category bars use distinct colors.
+- A subtle version marker is shown in the UI header (`APP_VERSION`, fallback `EXPORT_VERSION`).
 - Tables and full-data summary are split into a dedicated `/tables` page with month and text filters.
 
 ## CI Image Build
@@ -61,6 +67,7 @@ Workflow: `.github/workflows/splitwise-export.yml`
 - Pushes `latest` on `main` (dev track)
 - Pushes `release-vprod` and a release tag when pushing Git tags matching `release/v*prod` (prod track)
 - Runs build-only on pull requests
+- Injects `APP_VERSION` build arg from image metadata.
 
 ## Kubernetes Layout
 
@@ -123,6 +130,7 @@ Required GitHub Variables (shared):
 - `SPLITWISE_EXCLUDE_MONTHS` (optional)
 - `SPLITWISE_EXCLUDE_DESCRIPTIONS` (optional)
 - `SPLITWISE_REFRESH_SECONDS` (optional, defaults to `900`)
+- `SPLITWISE_DEBT_DIRECTION` (optional, `reverse` or `normal`, defaults to `reverse`)
 - `SPLITWISE_NAMESPACE_DEV` (optional override, default `splitwise-dev`)
 - `SPLITWISE_NAMESPACE_PROD` (optional override, default `splitwise`)
 
