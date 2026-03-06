@@ -47,15 +47,15 @@ jobs:
           password: ${{ secrets.EMAIL_PASSWORD }}
           subject: "Splitwise Export - Group ${{ vars.SPLITWISE_GROUP_ID }}"
           to: ${{ vars.SEND_TO_EMAIL }}
-          from: ${{ secrets.EMAIL_FROM }}
+          from: "SplitWise-Household-Expenses-App"
           body: |
-            Splitwise household expenses export for group ID: ${{ vars.SPLITWISE_GROUP_ID }}.
+            Splitwise household expenses export for group "${{ steps.export.outputs.group_name }}" (ID: ${{ vars.SPLITWISE_GROUP_ID }}).
 
             Generated: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           attachments: splitwise_group_*.xlsx
 
       - name: Upload Excel file
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: splitwise-export
           path: splitwise_group_*.xlsx
