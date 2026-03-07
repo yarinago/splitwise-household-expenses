@@ -5,7 +5,9 @@ namespace: splitwise-dev
 
 resources:
   - ../../base
-  - secret.enc.yaml
+
+generators:
+  - secret-generator.yaml
 
 patches:
   - path: version-patch.yaml
