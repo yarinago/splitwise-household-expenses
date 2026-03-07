@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: splitwise-dev
+
+resources:
+  - ../../base
+  - secret.enc.yaml
+
+patches:
+  - path: version-patch.yaml
+
+images:
+  - name: ghcr.io/REPLACE_ME/splitwise-household-expenses
+    newName: ghcr.io/yarinago/splitwise-household-expenses
+    newTag: latest

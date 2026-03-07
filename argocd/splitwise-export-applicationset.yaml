@@ -1,0 +1,38 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: splitwise-export
+  namespace: argocd
+spec:
+  generators:
+    - list:
+        elements:
+          - env: dev
+            project: splitwise-household-expenses
+            namespace: splitwise-dev
+            path: k8s/overlays/dev
+          - env: prod
+            project: splitwise-household-expenses
+            namespace: splitwise
+            path: k8s/overlays/prod
+  template:
+    metadata:
+      name: splitwise-export-{{env}}
+      labels:
+        app.kubernetes.io/name: splitwise-export
+        app.kubernetes.io/part-of: splitwise-household-expenses
+    spec:
+      project: "{{project}}"
+      source:
+        repoURL: https://github.com/yarinago/splitwise-household-expenses.git
+        targetRevision: main
+        path: "{{path}}"
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "{{namespace}}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
