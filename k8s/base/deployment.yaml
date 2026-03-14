@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: web
-          image: ghcr.io/REPLACE_ME/splitwise-household-expenses:latest
+          image: ghcr.io/yarinago/splitwise-household-expenses:latest
           imagePullPolicy: Always
           ports:
             - name: http

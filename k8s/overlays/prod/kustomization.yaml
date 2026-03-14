@@ -13,6 +13,6 @@ patches:
   - path: version-patch.yaml
 
 images:
-  - name: ghcr.io/REPLACE_ME/splitwise-household-expenses
+  - name: ghcr.io/yarinago/splitwise-household-expenses
     newName: ghcr.io/yarinago/splitwise-household-expenses
     newTag: release-vprod
