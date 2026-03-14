@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-Splitwise → Excel (All‑History, Incremental Upsert + Per‑Person Owed Columns)
+Splitwise -> Excel (All-History, Incremental Upsert + Per-Person Owed Columns)
 
 What this script does
 ---------------------
-• Uses OAuth2 token from environment variables to read ALL expenses for a configured group.
-• Incrementally upserts by expense_id (re‑runs only add/update deltas).
-• For each expense, pulls per‑user splits from the expense's **users[].owed_share** (not repayments),
+- Uses OAuth2 token from environment variables to read ALL expenses for a configured group.
+- Incrementally upserts by expense_id (re-runs only add/update deltas).
+- For each expense, pulls per-user splits from the expense's **users[].owed_share** (not repayments),
   and writes how much each tracked member owes **on the Raw_Expenses sheet itself**.
-• Builds per‑month category totals and per‑person monthly owed totals.
-• Writes an Excel file with:
-    - Raw_Expenses  → includes columns for how much each member **owes** per expense (from `owed_share`), with columns named using the members' display names + "_owes".
-    - Raw_Shares    → optional, long form: one row per (expense, person) with owed_share
+- Builds per-month category totals and per-person monthly owed totals.
+- Writes an Excel file with:
+    - Raw_Expenses  -> includes columns for how much each member **owes** per expense (from `owed_share`), with columns named using the members' display names + "_owes".
+    - Raw_Shares    -> optional, long form: one row per (expense, person) with owed_share
                       (disable with --no-raw-shares if you don't want it)
     - Monthly_By_Category
-    - PerPerson_Month → how much each tracked member owes per month (from `owed_share`)
-    - Charts        → interactive dashboard with summary tiles and charts
+    - PerPerson_Month -> how much each tracked member owes per month (from `owed_share`)
+    - Charts        -> interactive dashboard with summary tiles and charts
 
 Configuration (Environment Variables)
 --------------------------------------
@@ -32,6 +32,13 @@ OPTIONAL (GitHub Variables):
   SPLITWISE_FIRST_MONTH          Start month for history (default: 2008-01)
   SPLITWISE_EXCLUDE_MONTHS       Months to exclude (CSV, e.g., 2025-10,2025-11)
   SPLITWISE_EXCLUDE_DESCRIPTIONS Description patterns to exclude (CSV, case-insensitive)
+  SEND_TO_EMAIL                  Recipients for export email (CSV)
+  SMTP_SERVER                    SMTP host (default: smtp.gmail.com)
+  SMTP_PORT                      SMTP port (default: 587)
+
+OPTIONAL (GitHub Secrets, if email is enabled):
+  EMAIL_FROM                     SMTP username/from address
+  EMAIL_PASSWORD                 SMTP password/app password
 
 See README.md for detailed setup instructions.
 Hebrew is fully supported in descriptions, categories, and names.
@@ -42,32 +49,76 @@ import argparse
 import datetime as dt
 import json
 import os
+import smtplib
 import sys
+import time
+from email.message import EmailMessage
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 from dotenv import load_dotenv
 
-# ---------- Configuration (from environment/CLI) ----------
-_group_id_str = os.getenv("SPLITWISE_GROUP_ID", "").strip()
-DEFAULT_GROUP_ID = int(_group_id_str) if _group_id_str else 0
-FIRST_MONTH = os.getenv("SPLITWISE_FIRST_MONTH", "2008-01")
-OUTPUT_FILE_TEMPLATE = os.getenv("SPLITWISE_OUTPUT_FILE", f"splitwise_group_{DEFAULT_GROUP_ID}_all_history.xlsx")
+# ---------- Configuration (runtime-loaded from environment/CLI) ----------
 GLOBAL_MEMBER_OWES_SUM: Dict[str, float] = {}
+DEFAULT_GROUP_ID = 0
+FIRST_MONTH = "2008-01"
+OUTPUT_FILE_TEMPLATE = "splitwise_group_{group_id}_all_history.xlsx"
+MEMBER_ID_TO_NAME: Dict[int, str] = {}
 
-# Members mapping (id → display name), loaded from env or CLI
-def _load_members() -> Dict[int, str]:
-    members_json = os.getenv("SPLITWISE_MEMBERS")
-    if members_json:
-        try:
-            return {int(k): v for k, v in json.loads(members_json).items()}
-        except Exception as e:
-            print(f"[!] Failed to parse SPLITWISE_MEMBERS JSON: {e}", file=sys.stderr)
+
+def _parse_int_env(name: str, default: int = 0) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+# Members mapping (id -> display name), loaded from env or CLI
+def _load_members(required: bool = True) -> Dict[int, str]:
+    members_json = (os.getenv("SPLITWISE_MEMBERS") or "").strip()
+    if not members_json:
+        if required:
+            raise SystemExit(
+                "[!] SPLITWISE_MEMBERS not set. Provide JSON dict like '{\"12345\": \"Alice\", \"67890\": \"Bob\"}'."
+            )
+        return {}
+    try:
+        data = json.loads(members_json)
+        if not isinstance(data, dict):
+            raise ValueError("SPLITWISE_MEMBERS must be a JSON object.")
+        return {int(k): str(v) for k, v in data.items()}
+    except Exception as e:
+        print(f"[!] Failed to parse SPLITWISE_MEMBERS JSON: {e}", file=sys.stderr)
+        if required:
             raise SystemExit("[!] Provide valid SPLITWISE_MEMBERS JSON")
-    else:
-        raise SystemExit("[!] SPLITWISE_MEMBERS not set. Provide JSON dict like '{\"12345\": \"Alice\", \"67890\": \"Bob\"}'")
+        return {}
 
-MEMBER_ID_TO_NAME: Dict[int, str] = _load_members()
+
+def refresh_runtime_config(load_env: bool = False, require_members: bool = False) -> None:
+    """
+    Load config from environment into module globals.
+    Use `load_env=True` for local runs (.env). Keep false in CI/K8s where env is injected externally.
+    """
+    global DEFAULT_GROUP_ID, FIRST_MONTH, OUTPUT_FILE_TEMPLATE, MEMBER_ID_TO_NAME
+
+    if load_env:
+        load_dotenv()
+
+    DEFAULT_GROUP_ID = _parse_int_env("SPLITWISE_GROUP_ID", default=0)
+    FIRST_MONTH = (os.getenv("SPLITWISE_FIRST_MONTH") or "2008-01").strip() or "2008-01"
+    default_template = (
+        f"splitwise_group_{DEFAULT_GROUP_ID}_all_history.xlsx"
+        if DEFAULT_GROUP_ID
+        else "splitwise_group_{group_id}_all_history.xlsx"
+    )
+    OUTPUT_FILE_TEMPLATE = (os.getenv("SPLITWISE_OUTPUT_FILE") or default_template).strip() or default_template
+    MEMBER_ID_TO_NAME = _load_members(required=require_members)
+
+
+# Safe defaults at import time; strict validation happens in runtime entrypoints.
+refresh_runtime_config(load_env=False, require_members=False)
 
 # ---------- Splitwise SDK ----------
 try:
@@ -237,6 +288,7 @@ def normalize_person_shares(expenses: Iterable[Expense]) -> pd.DataFrame:
         for u in users:
             uid = None
             owed = None
+            paid = None
             display_name = None
 
             # If dict-like
@@ -245,10 +297,11 @@ def normalize_person_shares(expenses: Iterable[Expense]) -> pd.DataFrame:
                 if uid is None and isinstance(u.get("user"), dict):
                     uid = u["user"].get("id")
                 owed = u.get("owed_share") or u.get("owedShare") or u.get("owed")
+                paid = u.get("paid_share") or u.get("paidShare") or u.get("paid")
                 display_name = (u.get("user") or {}).get("first_name")
             else:
                 # SDK object path(s)
-                # A) ExpenseUser inherits from User → id is available via getId()/id
+                # A) ExpenseUser inherits from User -> id is available via getId()/id
                 getter = getattr(u, "getId", None)
                 if callable(getter):
                     uid = getter()
@@ -286,6 +339,13 @@ def normalize_person_shares(expenses: Iterable[Expense]) -> pd.DataFrame:
                     if val is not None:
                         owed = val
                         break
+                for attr in ("getPaidShare", "paid_share", "paidShare", "getPaid"):
+                    val = getattr(u, attr, None)
+                    if callable(val):
+                        val = val()
+                    if val is not None:
+                        paid = val
+                        break
 
             # Fallback: if still no name, try direct first-name on u
             if not display_name and not isinstance(u, dict):
@@ -299,6 +359,7 @@ def normalize_person_shares(expenses: Iterable[Expense]) -> pd.DataFrame:
 
             uid = int(uid) if uid is not None else None
             owed_val = _coerce_float(owed, 0.0)
+            paid_val = _coerce_float(paid, 0.0)
             # map to your fixed display names if possible
             name = MEMBER_ID_TO_NAME.get(uid, display_name if display_name else (str(uid) if uid is not None else "Unknown"))
 
@@ -308,6 +369,7 @@ def normalize_person_shares(expenses: Iterable[Expense]) -> pd.DataFrame:
                 "person": str(name) if name is not None else "Unknown",
                 "month": month,
                 "owed_share": owed_val,
+                "paid_share": paid_val,
             })
 
     df = pd.DataFrame(rows)
@@ -319,20 +381,8 @@ def normalize_person_shares(expenses: Iterable[Expense]) -> pd.DataFrame:
     if "user_id" in df.columns:
         df["user_id"] = pd.to_numeric(df["user_id"], errors="coerce").astype("Int64")
     df["owed_share"] = pd.to_numeric(df["owed_share"], errors="coerce").fillna(0.0)
-    return df
-    df = df[df["month"].notna()].copy()
-    if "expense_id" in df.columns:
-        df["expense_id"] = pd.to_numeric(df["expense_id"], errors="coerce").astype("Int64")
-    if "user_id" in df.columns:
-        df["user_id"] = pd.to_numeric(df["user_id"], errors="coerce").astype("Int64")
-    df["owed_share"] = pd.to_numeric(df["owed_share"], errors="coerce").fillna(0.0)
-    return df
-    df = df[df["month"].notna()].copy()
-    if "expense_id" in df.columns:
-        df["expense_id"] = pd.to_numeric(df["expense_id"], errors="coerce").astype("Int64")
-    if "user_id" in df.columns:
-        df["user_id"] = pd.to_numeric(df["user_id"], errors="coerce").astype("Int64")
-    df["owed_share"] = pd.to_numeric(df["owed_share"], errors="coerce").fillna(0.0)
+    if "paid_share" in df.columns:
+        df["paid_share"] = pd.to_numeric(df["paid_share"], errors="coerce").fillna(0.0)
     return df
 
 
@@ -343,7 +393,7 @@ def widen_raw_with_member_owed(raw_df: pd.DataFrame, shares_df: pd.DataFrame, id
     """
     out = raw_df.copy()
 
-    # Drop any stale member columns (_owed / _paid / _owes and their _x/_y variants) before merging
+    # Drop stale member columns (_owed / _paid / _owes and their _x/_y variants) before merging.
     cols_to_drop: List[str] = []
     for display_name in id_to_name.values():
         for base in (f"{display_name}_owes", f"{display_name}_owed", f"{display_name}_paid"):
@@ -354,110 +404,26 @@ def widen_raw_with_member_owed(raw_df: pd.DataFrame, shares_df: pd.DataFrame, id
         out.drop(columns=list(set(cols_to_drop)), inplace=True, errors="ignore")
 
     if shares_df.empty or out.empty:
-        # Ensure final owes columns exist even if no data
         for display_name in id_to_name.values():
             base = f"{display_name}_owes"
             if base not in out.columns:
                 out[base] = 0.0
         return out
 
-    # Build pivot from users[].owed_share → "owes"
     wanted_ids = list(id_to_name.keys())
     sub = shares_df[shares_df["user_id"].isin(wanted_ids)].copy()
     piv = sub.pivot_table(index="expense_id", columns="user_id", values="owed_share", aggfunc="sum", fill_value=0.0)
     piv = piv.reindex(columns=wanted_ids, fill_value=0.0)
     piv.columns = [f"{id_to_name.get(int(uid), str(uid))}_owes" for uid in piv.columns]
 
-    # Merge
     out = out.merge(piv.reset_index(), on="expense_id", how="left")
 
-    # Ensure final _owes columns exist and are numeric
     for display_name in id_to_name.values():
         base = f"{display_name}_owes"
         if base not in out.columns:
             out[base] = 0.0
         out[base] = pd.to_numeric(out[base], errors="coerce").fillna(0.0).round(2)
 
-    return out
-
-    # Build pivot from users[].owed_share → we treat as "paid"
-    wanted_ids = list(id_to_name.keys())
-    sub = shares_df[shares_df["user_id"].isin(wanted_ids)].copy()
-    piv = sub.pivot_table(index="expense_id", columns="user_id", values="owed_share", aggfunc="sum", fill_value=0.0)
-    piv = piv.reindex(columns=wanted_ids, fill_value=0.0)
-    piv.columns = [f"{id_to_name.get(int(uid), str(uid))}_paid" for uid in piv.columns]
-
-    # Merge
-    out = out.merge(piv.reset_index(), on="expense_id", how="left")
-
-    # Ensure final _paid columns exist and are numeric
-    for display_name in id_to_name.values():
-        base = f"{display_name}_paid"
-        if base not in out.columns:
-            out[base] = 0.0
-        out[base] = pd.to_numeric(out[base], errors="coerce").fillna(0.0).round(2)
-
-    return out
-
-    # Build a compact pivot of owed shares per expense for the tracked ids
-    wanted_ids = list(id_to_name.keys())
-    sub = shares_df[shares_df["user_id"].isin(wanted_ids)].copy()
-    piv = sub.pivot_table(index="expense_id", columns="user_id", values="owed_share", aggfunc="sum", fill_value=0.0)
-    piv = piv.reindex(columns=wanted_ids, fill_value=0.0)  # fixed order
-    piv.columns = [f"{id_to_name.get(int(uid), str(uid))}_owed" for uid in piv.columns]
-
-    # Merge in owed columns (safe now that we dropped stale ones)
-    out = out.merge(piv.reset_index(), on="expense_id", how="left")
-
-    # Ensure owed columns exist and are numeric
-    for display_name in id_to_name.values():
-        base = f"{display_name}_owed"
-        if base not in out.columns:
-            out[base] = 0.0
-        out[base] = pd.to_numeric(out[base], errors="coerce").fillna(0.0).round(2)
-
-    return out
-
-    # Build a compact pivot of owed shares per expense for the tracked ids
-    wanted_ids = list(id_to_name.keys())
-    sub = shares_df[shares_df["user_id"].isin(wanted_ids)].copy()
-    piv = sub.pivot_table(index="expense_id", columns="user_id", values="owed_share", aggfunc="sum", fill_value=0.0)
-    piv = piv.reindex(columns=wanted_ids, fill_value=0.0)  # fixed order
-    piv.columns = [f"{id_to_name.get(int(uid), str(uid))}_owed" for uid in piv.columns]
-
-    # Merge in owed columns; if columns already exist, pandas will create _x/_y
-    out = out.merge(piv.reset_index(), on="expense_id", how="left")
-
-    # Coalesce any *_owed_x/_owed_y into a single *_owed, then clean types
-    for display_name in id_to_name.values():
-        base = f"{display_name}_owed"
-        cx, cy = f"{base}_x", f"{base}_y"
-        if cy in out.columns:
-            out[base] = out[cy]
-        elif cx in out.columns and base not in out.columns:
-            out[base] = out[cx]
-        if base not in out.columns:
-            out[base] = 0.0
-        out[base] = pd.to_numeric(out[base], errors="coerce").fillna(0.0).round(2)
-        # Drop the temporary suffix columns if present
-        if cx in out.columns:
-            out.drop(columns=[cx], inplace=True)
-        if cy in out.columns:
-            out.drop(columns=[cy], inplace=True)
-
-    return out
-    wanted_ids = list(id_to_name.keys())
-    sub = shares_df[shares_df["user_id"].isin(wanted_ids)].copy()
-    piv = sub.pivot_table(index="expense_id", columns="user_id", values="owed_share", aggfunc="sum", fill_value=0.0)
-    piv = piv.reindex(columns=wanted_ids, fill_value=0.0)  # fixed 2‑member order
-    piv.columns = [f"{id_to_name.get(int(uid), str(uid))}_owed" for uid in piv.columns]
-    out = out.merge(piv.reset_index(), on="expense_id", how="left")
-    for display_name in id_to_name.values():
-        c = f"{display_name}_owed"
-        if c not in out.columns:
-            out[c] = 0.0
-        out[c] = pd.to_numeric(out[c], errors="coerce")
-        out[c] = out[c].fillna(0.0).round(2)
     return out
 
 
@@ -469,7 +435,7 @@ def apply_custom_exclusions(raw_df: pd.DataFrame, shares_df: pd.DataFrame) -> Tu
     
     Env vars:
       SPLITWISE_EXCLUDE_MONTHS: comma-separated months (e.g., "2025-10,2025-11")
-      SPLITWISE_EXCLUDE_DESCRIPTIONS: comma-separated substrings to match case-insensitive (e.g., "פריז,trip")
+      SPLITWISE_EXCLUDE_DESCRIPTIONS: comma-separated substrings to match case-insensitive (e.g., "paris,trip")
     
     Applies to both Raw_Expenses and Raw_Shares/PerPerson_Month.
     """
@@ -520,9 +486,9 @@ def build_pivots(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         aggfunc="sum", fill_value=0.0, sort=True
     ).sort_index()
     pivot["Total"] = pivot.sum(axis=1)
-    mom = pivot.diff(); mom.columns = [f"Δ {c}" for c in mom.columns]
+    mom = pivot.diff(); mom.columns = [f"Delta {c}" for c in mom.columns]
     pct = pivot.pct_change().replace([pd.NA, pd.NaT, float("inf"), float("-inf")], 0.0)
-    pct.columns = [f"Δ% {c}" for c in pct.columns]
+    pct.columns = [f"Delta% {c}" for c in pct.columns]
     mom_full = pd.concat([pivot, mom, pct], axis=1)
     return pivot, mom_full
 
@@ -638,10 +604,6 @@ def read_existing_raw(path: str) -> pd.DataFrame:
             df[owes] = pd.to_numeric(df[owes], errors="coerce").fillna(0.0).round(2)
 
         return df
-    except Exception:
-        return pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
     except Exception:
         return pd.DataFrame()
 
@@ -770,7 +732,7 @@ def write_excel(
             val = GLOBAL_MEMBER_OWES_SUM.get(name, 0.0)
             amount_cell.value = val
             amount_cell.style = "Calculation"
-            amount_cell.number_format = u'₪ #,##0.00'
+            amount_cell.number_format = u'\u20aa #,##0.00'
             amount_cell.alignment = Alignment(horizontal="center", vertical="center")
             amount_cell.font = Font(size=18, bold=True)
 
@@ -1007,8 +969,8 @@ def write_excel(
                         "0)"
                     )
 
-                    # If Charts!L2 = "All months" → SUM over all months
-                    # else → value for the selected month
+                    # If Charts!L2 = "All months" -> SUM over all months
+                    # else -> value for the selected month
                     formula = f'=IF(Charts!$L$2="All months", {sum_all}, {index_by_month})'
                     ws_ct[f"B{i}"].value = formula
 
@@ -1059,7 +1021,7 @@ def write_excel(
 
 # ---------- CLI ----------
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Splitwise → Excel (all‑history, incremental upsert + per‑person paid)")
+    p = argparse.ArgumentParser(description="Splitwise -> Excel (all-history, incremental upsert + per-person paid)")
     p.add_argument("--out", help="Output Excel path (.xlsx). Default: splitwise_group_<id>_all_history.xlsx")
     p.add_argument("--start", help="Override start month (YYYY-MM). Default: SPLITWISE_FIRST_MONTH env var or 2008-01")
     p.add_argument("--end", help="Override end month (YYYY-MM). Default: current month")
@@ -1083,8 +1045,95 @@ def resolve_token(token_arg: Optional[str]) -> Dict:
         raise SystemExit("[!] Could not parse token JSON. If in a file, pass @/path/to/token.json")
 
 
+def _parse_csv_values(raw: str) -> List[str]:
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def _normalize_version_label(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw:
+        return "unknown"
+    safe_chars = []
+    for ch in raw:
+        if ch.isalnum() or ch in (".", "_", "-"):
+            safe_chars.append(ch)
+        else:
+            safe_chars.append("-")
+    normalized = "".join(safe_chars).strip("-")
+    return normalized or "unknown"
+
+
+def _append_version_to_filename(path: str, version_label: str) -> str:
+    base, ext = os.path.splitext(path)
+    suffix = f"_v{version_label}"
+    if base.endswith(suffix):
+        return path
+    if not ext:
+        ext = ".xlsx"
+    return f"{base}{suffix}{ext}"
+
+
+def send_export_email_if_configured(out_path: str, group_name: str, group_id: int, version_label: str) -> None:
+    send_to_raw = os.getenv("SEND_TO_EMAIL", "").strip()
+    if not send_to_raw:
+        return
+
+    recipients = _parse_csv_values(send_to_raw)
+    if not recipients:
+        raise SystemExit("[!] SEND_TO_EMAIL was provided but no valid recipients were found.")
+
+    email_from = os.getenv("EMAIL_FROM", "").strip()
+    email_password = os.getenv("EMAIL_PASSWORD", "").strip()
+    if not email_from or not email_password:
+        raise SystemExit("[!] SEND_TO_EMAIL is set but EMAIL_FROM or EMAIL_PASSWORD is missing.")
+
+    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com").strip() or "smtp.gmail.com"
+    smtp_port_raw = os.getenv("SMTP_PORT", "587").strip() or "587"
+    try:
+        smtp_port = int(smtp_port_raw)
+    except ValueError:
+        raise SystemExit(f"[!] Invalid SMTP_PORT value: {smtp_port_raw}")
+
+    subject = os.getenv("EMAIL_SUBJECT", f"Splitwise Export v{version_label} - {group_name}")
+    body = os.getenv(
+        "EMAIL_BODY",
+        (
+            f'Splitwise household expenses export for group "{group_name}" (ID: {group_id}).\n'
+            f"Version: {version_label}\n"
+            f"File: {os.path.basename(out_path)}"
+        ),
+    )
+
+    with open(out_path, "rb") as f:
+        attachment = f.read()
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = email_from
+    msg["To"] = ", ".join(recipients)
+    msg.set_content(body)
+    msg.add_attachment(
+        attachment,
+        maintype="application",
+        subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=os.path.basename(out_path),
+    )
+
+    try:
+        with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
+            smtp.login(email_from, email_password)
+            smtp.send_message(msg)
+    except Exception as e:
+        raise SystemExit(f"[!] Failed to send export email: {e}")
+
+    print(f"Email sent to: {', '.join(recipients)}")
+
+
 def main():
-    load_dotenv()
+    refresh_runtime_config(load_env=True, require_members=True)
     args = parse_args()
 
     if not DEFAULT_GROUP_ID:
@@ -1093,7 +1142,9 @@ def main():
     group_id = args.group_id or DEFAULT_GROUP_ID
     start_ym = args.start or FIRST_MONTH
     end_ym = args.end or ym_today()
-    out_path = args.out or OUTPUT_FILE_TEMPLATE.format(group_id=group_id)
+    version_label = _normalize_version_label(os.getenv("EXPORT_VERSION", "unknown"))
+    out_path_raw = args.out or OUTPUT_FILE_TEMPLATE.format(group_id=group_id)
+    out_path = _append_version_to_filename(out_path_raw, version_label)
 
     client_id = os.getenv("SPLITWISE_CLIENT_ID")
     client_secret = os.getenv("SPLITWISE_CLIENT_SECRET")
@@ -1112,7 +1163,7 @@ def main():
         compute_group_owes_from_simplified_debts(group, MEMBER_ID_TO_NAME)
     )
 
-    print(f"Fetching expenses from {start_ym} to {end_ym}…")
+    print(f"Fetching expenses from {start_ym} to {end_ym}...")
     expenses = fetch_expenses_all_history(sw, group_id, start_ym, end_ym)
     print(f"Fetched {len(expenses)} expenses from API")
 
@@ -1120,14 +1171,14 @@ def main():
     incoming_df = normalize_expenses(expenses)
     person_rows_df = normalize_person_shares(expenses)
 
-    # Exclude 'פריז' expenses in 2025-11
+    # Exclude selected descriptions/months from configured env rules.
     before_raw = len(incoming_df)
     before_shares = 0 if person_rows_df is None else len(person_rows_df)
     incoming_df, person_rows_df = apply_custom_exclusions(incoming_df, person_rows_df)
     removed_raw = before_raw - len(incoming_df)
     removed_shares = before_shares - (0 if person_rows_df is None else len(person_rows_df))
     if removed_raw or removed_shares:
-        print(f"Applied exclusions → removed {removed_raw} expenses and {removed_shares} share rows.")
+        print(f"Applied exclusions -> removed {removed_raw} expenses and {removed_shares} share rows.")
 
     if args.debug_shares:
         print(
@@ -1157,8 +1208,9 @@ def main():
     # Write workbook (Raw_Shares optional)
     shares_out = None if args.no_raw_shares else person_rows_df
     write_excel(out_path, raw_wide, pivot, mom, person_pivot, shares_out)
+    send_export_email_if_configured(out_path, group.getName(), group_id, version_label)
 
-    print(f"✅ Export complete → {out_path}")
+    print(f"Export complete -> {out_path}")
     if not raw_wide.empty and raw_wide.get("currency", pd.Series()).nunique() > 1:
         print("[!] Multiple currencies detected. Amounts are not converted in this export.")
 
@@ -1166,3 +1218,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
