@@ -8,6 +8,52 @@ The app now runs as a web service that computes Splitwise data in the background
 - JSON API: `/api/dashboard`
 - Health probes: `/healthz`, `/readyz`
 
+The container image is generic. Every user must provide their own Splitwise credentials and group/member configuration at runtime.
+
+## Legacy Excel Export
+
+The legacy flow is still supported for backward compatibility:
+- Script: `splitwise_to_excel.py`
+- Workflow: `.github/workflows/splitwise-export.yml`
+
+<details>
+<summary>What <code>splitwise_to_excel.py</code> does</summary>
+
+- Pulls Splitwise expenses for the configured group and date range.
+- Builds Excel output with sheets such as `Raw_Expenses`, `Raw_Shares` (optional), `Monthly_By_Category`, `PerPerson_Month`, and `Charts`.
+- Supports exclusion rules from env vars (`SPLITWISE_EXCLUDE_MONTHS`, `SPLITWISE_EXCLUDE_DESCRIPTIONS`).
+- Can send the generated file by email when SMTP values are provided.
+
+</details></br>
+
+Run locally:
+```bash
+python splitwise_to_excel.py
+```
+
+<details>
+<summary>Useful CLI flags</summary>
+
+- `--out` custom output filename
+- `--start` and `--end` month range (`YYYY-MM`)
+- `--group-id` override group id
+- `--no-raw-shares` skip `Raw_Shares` sheet
+- `--debug-shares` print share parsing debug output
+
+</details>
+
+<details>
+<summary>Legacy workflow behavior (<code>splitwise-export.yml</code>)</summary>
+
+- Triggered on schedule at `02:00 UTC` on the 1st and 15th of each month, and by manual dispatch.
+- Runs `python splitwise_to_excel.py`.
+- Uses GitHub Secrets for sensitive credentials (`SPLITWISE_CLIENT_ID`, `SPLITWISE_CLIENT_SECRET`, `SPLITWISE_ACCESS_TOKEN_JSON`).
+- Uses GitHub Variables for config (`SPLITWISE_GROUP_ID`, `SPLITWISE_MEMBERS`, and optional filters).
+- Sends the generated workbook by email using `EMAIL_FROM` + `EMAIL_PASSWORD` to `SEND_TO_EMAIL`.
+- Uploads workbook as a workflow artifact.
+
+</details>
+
 ## Local Run
 
 1. Install dependencies:
@@ -32,7 +78,7 @@ SPLITWISE_LOAD_DOTENV=1
 PORT=8080
 ```
 
-`.env` is optional and intended for local development. In GitHub Actions / Kubernetes / ArgoCD, values should come from repo variables/secrets and runtime ConfigMap/Secret injection.
+`.env` is optional and intended for local development. In Kubernetes / ArgoCD, values should come from manifests in this repo (`ConfigMap` + encrypted `Secret` files).
 
 3. Run the web app:
 ```bash
@@ -43,6 +89,48 @@ python web_app.py
 ```text
 http://localhost:8080
 ```
+
+## Run With Docker Image
+
+Anyone can run the published image with their own values.
+
+1. Pull and run:
+```bash
+docker run --rm -p 8080:8080 \
+  -e SPLITWISE_LOAD_DOTENV=0 \
+  -e SPLITWISE_CLIENT_ID="your-client-id" \
+  -e SPLITWISE_CLIENT_SECRET="your-client-secret" \
+  -e SPLITWISE_ACCESS_TOKEN_JSON='{"access_token":"...","token_type":"bearer","refresh_token":"..."}' \
+  -e SPLITWISE_GROUP_ID="12345678" \
+  -e SPLITWISE_MEMBERS='{"11111111":"Alice","22222222":"Bob"}' \
+  -e SPLITWISE_FIRST_MONTH="2008-01" \
+  -e SPLITWISE_DEBT_DIRECTION="reverse" \
+  -e PORT="8080" \
+  ghcr.io/yarinago/splitwise-household-expenses:latest
+```
+
+2. Open:
+```text
+http://localhost:8080
+```
+
+Required runtime variables:
+- `SPLITWISE_CLIENT_ID`
+- `SPLITWISE_CLIENT_SECRET`
+- `SPLITWISE_ACCESS_TOKEN_JSON`
+- `SPLITWISE_GROUP_ID`
+- `SPLITWISE_MEMBERS`
+
+Optional runtime variables:
+- `SPLITWISE_FIRST_MONTH`
+- `SPLITWISE_EXCLUDE_MONTHS`
+- `SPLITWISE_EXCLUDE_DESCRIPTIONS`
+- `SPLITWISE_REFRESH_SECONDS`
+- `SPLITWISE_DEBT_DIRECTION`
+- `SPLITWISE_PERSON_OWES_DIRECTION`
+- `SPLITWISE_RECENT_EXPENSES_LIMIT`
+- `SPLITWISE_TABLE_LIMIT`
+- `APP_VERSION`
 
 ## Background Compute Model
 
@@ -61,34 +149,40 @@ http://localhost:8080
 
 ## CI Image Build
 
-Workflow: `.github/workflows/splitwise-export.yml`
 
-- Builds Docker image from `Dockerfile`
-- Pushes `latest` on `main` (dev track)
-- Pushes `release-vprod` and a release tag when pushing Git tags matching `release/v*prod` (prod track)
-- Runs build-only on pull requests
-- Injects `APP_VERSION` build arg from image metadata.
+
+Workflow: `.github/workflows/splitwise-image-build.yml`
+
+This workflow automates Docker image builds and publishing for both development and production:
+
+- When changes are merged into the `develop` branch, the workflow builds the Docker image and pushes it to GitHub Container Registry (GHCR) with the tags: `latest`, `changelog`, and the current GitHub run ID. These tags are intended for development and testing purposes.
+- When a Git tag matching `release/v*prod` is pushed, the workflow builds and pushes the image with the tags: `release-vprod` and the specific release tag. This is the production release track.
+- On the `main` branch, the workflow can also push the `latest` tag if needed for legacy compatibility.
+- On pull requests, the workflow runs the build for validation but does not push images.
+- The build process injects the `APP_VERSION` build argument from image metadata.
 
 ## Kubernetes Layout
 
-- `k8s/base`: shared manifests (`Deployment` + `Service`)
-- `k8s/overlays/dev`: development overrides
-- `k8s/overlays/prod`: production overrides
-- `k8s/base/secret.example.yaml`: template for required secret keys
+- `k8s/base`: shared manifests (`Deployment` + `Service` + `ConfigMap`)
+- `k8s/overlays/dev`: development overrides + `secret.enc.yaml` + `secret-generator.yaml`
+- `k8s/overlays/prod`: production overrides + `secret.enc.yaml` + `secret-generator.yaml`
 
-Render test:
+Render test (requires `ksops` plugin support):
 ```bash
-kubectl kustomize k8s/overlays/prod
-kubectl kustomize k8s/overlays/dev
+kustomize build --enable-alpha-plugins --enable-exec k8s/overlays/prod
+kustomize build --enable-alpha-plugins --enable-exec k8s/overlays/dev
 ```
 
-## Argo CD: App-Of-Apps + ApplicationSet
+## Argo CD: App-Of-Apps
 
 This repo contains:
-- `argocd/splitwise-export-applicationset.yaml`
+- `argocd/kustomization.yaml`
+- `argocd/splitwise-export-dev-application.yaml`
+- `argocd/-prod-application.yaml`
 
-That `ApplicationSet` generates child Argo `Application` resources for `dev`
-and `prod`, each pointing to its matching overlay path.
+These manifests define two child Argo `Application` resources:
+- `splitwise-export-dev` -> `k8s/overlays/dev`
+- `splitwise-export-prod` -> `k8s/overlays/prod`
 
 In your other repo (the one that runs Argo app-of-apps), create a parent `Application` that syncs this repo's `argocd` path:
 
@@ -99,7 +193,7 @@ metadata:
   name: splitwise-export-bootstrap
   namespace: argocd
 spec:
-  project: default
+  project: splitwise-household-expenses
   source:
     repoURL: https://github.com/yarinago/splitwise-household-expenses.git
     targetRevision: main
@@ -113,32 +207,68 @@ spec:
       selfHeal: true
 ```
 
-## Runtime Config Sync (Automated)
+## ArgoCD Deployment With Your Own Secrets
 
-Workflow: `.github/workflows/sync-runtime-config.yml`
 
-What it does:
-- Reads one shared set of GitHub Variables and Secrets
-- Creates/updates `ConfigMap/splitwise-export-config` in each namespace
-- Creates/updates `Secret/splitwise-export-secrets` in each namespace
-- Applies the same runtime config to both `dev` and `prod` (version differences come from image tags and overlay patch values)
+## Using Your Own Secrets and Age Keys
 
-Required GitHub Variables (shared):
-- `SPLITWISE_GROUP_ID`
-- `SPLITWISE_MEMBERS`
-- `SPLITWISE_FIRST_MONTH` (optional, defaults to `2008-01`)
-- `SPLITWISE_EXCLUDE_MONTHS` (optional)
-- `SPLITWISE_EXCLUDE_DESCRIPTIONS` (optional)
-- `SPLITWISE_REFRESH_SECONDS` (optional, defaults to `900`)
-- `SPLITWISE_DEBT_DIRECTION` (optional, `reverse` or `normal`, defaults to `reverse`)
-- `SPLITWISE_NAMESPACE_DEV` (optional override, default `splitwise-dev`)
-- `SPLITWISE_NAMESPACE_PROD` (optional override, default `splitwise`)
+If you (or another team) want to deploy this repository to your own Argo CD instance, you must use your own Age key pair for SOPS/KSOPS encryption and decryption. The public Age key included in this repository is only valid for the original author's Argo CD setup. If you use a different Argo CD instance, follow these steps:
 
-Required GitHub Secrets (shared):
-- `SPLITWISE_CLIENT_ID`
-- `SPLITWISE_CLIENT_SECRET`
-- `SPLITWISE_ACCESS_TOKEN_JSON`
+1. Generate your own Age key pair (see the [Age documentation](https://github.com/FiloSottile/age)).
+2. Set non-secret values in `k8s/base/configmap.yaml`.
+3. Set secret values in `k8s/overlays/dev/secret.enc.yaml` and `k8s/overlays/prod/secret.enc.yaml`.
+4. Encrypt secrets and configmaps with SOPS using your own Age public key:
+  ```bash
+  PUBLIC_AGE_KEY="<your-own-age-public-key>"
+  sops --encrypt --age "${PUBLIC_AGE_KEY}" --encrypted-regex '^(data|stringData)$' --in-place k8s/base/configmap.yaml
+  sops --encrypt --age "${PUBLIC_AGE_KEY}" --in-place k8s/overlays/dev/secret.enc.yaml
+  sops --encrypt --age "${PUBLIC_AGE_KEY}" --in-place k8s/overlays/prod/secret.enc.yaml
+  ```
+5. Configure your Argo CD repo-server with the matching Age private key so it can decrypt secrets at deployment time.
+6. Sync your Argo CD applications as usual.
 
-## Legacy Excel Export
+**Important:**
+- Never commit plaintext secret values.
+- Never share or commit Age private keys.
+- If multiple users or teams use different Age key pairs, each must encrypt with their own public key and configure their Argo CD with the matching private key.
 
-`splitwise_to_excel.py` is still in the repo for backward compatibility and can still generate workbook output if you run it directly.
+## Git-Encrypted Runtime Config (SOPS/Age)
+
+Runtime now supports GitOps-managed config and secret manifests:
+- Non-secret env vars are in `k8s/base/configmap.yaml`
+- Secret env vars are per-environment files:
+  - `k8s/overlays/dev/secret.enc.yaml`
+  - `k8s/overlays/prod/secret.enc.yaml`
+
+`secret.enc.yaml` files are committed with placeholders and should be encrypted with SOPS before committing real values.
+These encrypted files are materialized into Kubernetes `Secret` resources via `secret-generator.yaml` (`kind: ksops`) in each overlay.
+
+Typical flow:
+1. Fill `k8s/base/configmap.yaml` values (`SPLITWISE_GROUP_ID`, `SPLITWISE_MEMBERS`, and optional filters).
+2. Fill each `secret.enc.yaml` file with real values.
+3. Encrypt in-place using a public-key string variable:
+```bash
+PUBLIC_AGE_KEY="age1fe2ryt3m99dn4udls0f0fscrg6279jn885ls3kpxjs264vfwdgwsxmgfl9"
+sops --encrypt --age "${PUBLIC_AGE_KEY}" --encrypted-regex '^(data|stringData)$' --in-place k8s/base/configmap.yaml
+sops --encrypt --age "${PUBLIC_AGE_KEY}" --in-place k8s/overlays/dev/secret.enc.yaml
+sops --encrypt --age "${PUBLIC_AGE_KEY}" --in-place k8s/overlays/prod/secret.enc.yaml
+```
+4. Commit and push. ArgoCD deploys the encrypted manifests (with decryption configured in the Argo repo).
+
+### Migration From Existing GitHub Vars/Secrets
+
+If values currently exist only in GitHub Variables/Secrets, do a one-time copy:
+- GitHub Variables -> `k8s/base/configmap.yaml`
+  - `SPLITWISE_GROUP_ID`
+  - `SPLITWISE_MEMBERS`
+  - `SPLITWISE_FIRST_MONTH`
+  - `SPLITWISE_EXCLUDE_MONTHS`
+  - `SPLITWISE_EXCLUDE_DESCRIPTIONS`
+  - `SPLITWISE_REFRESH_SECONDS`
+  - `SPLITWISE_DEBT_DIRECTION`
+- GitHub Secrets -> each `secret.enc.yaml`
+  - `SPLITWISE_CLIENT_ID`
+  - `SPLITWISE_CLIENT_SECRET`
+  - `SPLITWISE_ACCESS_TOKEN_JSON`
+
+After confirming Argo deploys from encrypted files, you can remove old GitHub repo variables/secrets that were only used for runtime sync.
