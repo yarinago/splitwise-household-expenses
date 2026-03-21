@@ -1,13 +1,13 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: splitwise-local
+  name: splitwise-household-expenses-dev
   annotations:
     argocd.argoproj.io/ignore-healthcheck: "true"
 spec:
   ingressClassName: traefik
   rules:
-    - host: splitwise.localtest.me
+    - host: splitwise-household-expenses-dev.localtest.me
       http:
         paths:
           - path: /
