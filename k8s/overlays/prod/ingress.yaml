@@ -1,0 +1,19 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: splitwise-local
+  annotations:
+    argocd.argoproj.io/ignore-healthcheck: "true"
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: splitwise-prod.localtest.me
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: splitwise-export
+                port:
+                  number: 80

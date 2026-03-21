@@ -33,7 +33,7 @@ spec:
                 name: splitwise-export-secrets
           readinessProbe:
             httpGet:
-              path: /readyz
+              path: /healthz
               port: http
             initialDelaySeconds: 10
             periodSeconds: 15
