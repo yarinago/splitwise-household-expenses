@@ -16,4 +16,4 @@ patches:
 images:
   - name: ghcr.io/yarinago/splitwise-household-expenses
     newName: ghcr.io/yarinago/splitwise-household-expenses
-    newTag: release-vprod
+    newTag: prod

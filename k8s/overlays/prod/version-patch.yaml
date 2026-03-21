@@ -15,4 +15,4 @@ spec:
         - name: web
           env:
             - name: EXPORT_VERSION
-              value: release-vprod
+              value: prod
