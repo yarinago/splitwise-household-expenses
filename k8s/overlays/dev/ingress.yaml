@@ -7,7 +7,7 @@ metadata:
 spec:
   ingressClassName: traefik
   rules:
-    - host: splitwise-household-expenses-dev.localtest.me
+    - host: splitwise.localtest.me
       http:
         paths:
           - path: /
