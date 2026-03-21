@@ -156,7 +156,7 @@ Workflow: `.github/workflows/splitwise-image-build.yml`
 This workflow automates Docker image builds and publishing for both development and production:
 
 - When changes are merged into the `develop` branch, the workflow builds the Docker image and pushes it to GitHub Container Registry (GHCR) with the tags: `latest`, `changelog`, and the current GitHub run ID. These tags are intended for development and testing purposes.
-- When a Git tag matching `release/v*prod` is pushed, the workflow builds and pushes the image with the tags: `release-vprod` and the specific release tag. This is the production release track.
+- When a Git tag matching `release/v*` is pushed, the workflow builds and pushes the image with the tags: `release-vprod` and the specific release tag. This is the production release track.
 - On the `main` branch, the workflow can also push the `latest` tag if needed for legacy compatibility.
 - On pull requests, the workflow runs the build for validation but does not push images.
 - The build process injects the `APP_VERSION` build argument from image metadata.

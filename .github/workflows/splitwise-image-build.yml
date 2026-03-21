@@ -6,7 +6,7 @@ on:
       - main
       - develop
     tags:
-      - "release/v*prod"
+      - "release/v*"
   pull_request:
   workflow_dispatch:
 
@@ -44,9 +44,9 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/develop' }}
             type=raw,value=changelog,enable=${{ github.ref == 'refs/heads/develop' }}
             type=raw,value=${{ github.run_id }},enable=${{ github.ref == 'refs/heads/develop' }}
-            # For prod tags as before
-            type=raw,value=release-vprod,enable=${{ startsWith(github.ref, 'refs/tags/release/v') && endsWith(github.ref_name, 'prod') }}
-            type=ref,event=tag,enable=${{ startsWith(github.ref, 'refs/tags/release/v') && endsWith(github.ref_name, 'prod') }}
+            # For release tags: keep a stable prod alias and also publish the specific release tag
+            type=raw,value=release-vprod,enable=${{ startsWith(github.ref, 'refs/tags/release/v') }}
+            type=ref,event=tag,enable=${{ startsWith(github.ref, 'refs/tags/release/v') }}
 
       - name: Build and push image
         uses: docker/build-push-action@v6
