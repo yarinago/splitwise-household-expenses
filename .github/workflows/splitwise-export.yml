@@ -23,6 +23,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run Splitwise export
+        id: export
         env:
           # GitHub Secrets (sensitive credentials - never commit)
           SPLITWISE_CLIENT_ID: ${{ secrets.SPLITWISE_CLIENT_ID }}
@@ -38,25 +39,26 @@ jobs:
         run: python splitwise_to_excel.py
 
       - name: Send Excel file via email
-        if: success()
+        if: success() && vars.SEND_TO_EMAIL != ''
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
           server_port: 587
           username: ${{ secrets.EMAIL_FROM }}
           password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: "Splitwise Export - Group ${{ vars.SPLITWISE_GROUP_ID }}"
+          subject: "Splitwise Export - Group ${{ steps.export.outputs.group_name }}"
           to: ${{ vars.SEND_TO_EMAIL }}
           from: "SplitWise-Household-Expenses-App"
           body: |
             Splitwise household expenses export for group "${{ steps.export.outputs.group_name }}" (ID: ${{ vars.SPLITWISE_GROUP_ID }}).
 
+            File: ${{ steps.export.outputs.output_name }}
             Generated: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          attachments: splitwise_group_*.xlsx
+          attachments: ${{ steps.export.outputs.output_path }}
 
       - name: Upload Excel file
         uses: actions/upload-artifact@v6
         with:
           name: splitwise-export
-          path: splitwise_group_*.xlsx
+          path: ${{ steps.export.outputs.output_path }}
           retention-days: 30
