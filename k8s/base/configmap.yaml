@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+    name: splitwise-export-config
+data:
+    SPLITWISE_GROUP_ID: ENC[AES256_GCM,data:ImBBY/Lt3Eo=,iv:710XTwEUOkhFpZS0rWgg3fGey8UNI0mPC41niZJp1NY=,tag:39M/otPPVUNc7d1LEcu3TA==,type:str]
+    SPLITWISE_MEMBERS: ENC[AES256_GCM,data:wHa9uzXjuKH1pxtRoQBOWnXWWFZ5oAxFlYjlX5psaWqXTjvUneMpHwoq/jK11nm+,iv:aCWlycc7IER7XHA1bU6iSNll7+9/rh+tIknerxN3+5E=,tag:Dj9neqFK/48WhbNK8HSEKA==,type:str]
+    SPLITWISE_FIRST_MONTH: ENC[AES256_GCM,data:gF2gJ6+Pjw==,iv:eoL5xX5nUiAOyhsWKQV+vMGo6PLEljuaOio48VJcs/U=,tag:txpEW90HWxJc0zjwbrwE2A==,type:str]
+    SPLITWISE_EXCLUDE_MONTHS: ENC[AES256_GCM,data:CGlsGOTDJkjGd/1co4tq,iv:cIxy51LCNG9CKJ4LbEGd3a5cyMUy2LMCviOwe731XIg=,tag:GYrUOw3P3AFKKK6eZUa+Gg==,type:str]
+    SPLITWISE_EXCLUDE_DESCRIPTIONS: ENC[AES256_GCM,data:HOK5IDrgmNw=,iv:zC0MPseGPoNmaFFkhQ8dfHkx8BeIfAQETKyutyBqEEY=,tag:ma5LWoq0PPaFmjkG4emAjA==,type:str]
+    SPLITWISE_REFRESH_SECONDS: ENC[AES256_GCM,data:+L/E,iv:Ka777IhKTnfi60CHMNIs/NKA+wS3EeWErxXn2J8jmWM=,tag:ue0g1uyuIVXLkHsoqpxXqA==,type:str]
+    SPLITWISE_DEBT_DIRECTION: ENC[AES256_GCM,data:IGDcqO/8ug==,iv:cSTc84T7DumSrDStyoSKoIkN0WoCadfcVoTq8ZkQXRo=,tag:TsP7+xzaldXxn+HhHxo/7w==,type:str]
+    SPLITWISE_PERSON_OWES_DIRECTION: ENC[AES256_GCM,data:2Lpd8QHN3Q==,iv:5kMFNML/g7tTgugA+eF4t66E488gb2gU08wL2oPsd/s=,tag:xQ+d9pRTaxnkSpoCYcLKtg==,type:str]
+    SPLITWISE_RECENT_EXPENSES_LIMIT: ENC[AES256_GCM,data:FsY=,iv:s9kw1cw/auwc0p+Qio5uUJAn4fr3hLuo4PjADQmfgsQ=,tag:5+swn8TdJtkrLbHjIkJP9Q==,type:str]
+    SPLITWISE_TABLE_LIMIT: ENC[AES256_GCM,data:rcAy,iv:MKxTYVUCKo+sGaeSUtO4WHiyhc9qiObFdwY0rSyBwxA=,tag:22m6roEG3saVe8KSUECt3A==,type:str]
+sops:
+    age:
+        - recipient: age1fe2ryt3m99dn4udls0f0fscrg6279jn885ls3kpxjs264vfwdgwsxmgfl9
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSAwUjB3SFhDVUNBNVN1SXZM
+            dUxBenA5bW1WaENFb0JDem8wbEJERkVRMFhZCjE5cmtVQlJ6TDY1c3dFNk9HUi9k
+            SXUzSDdCbnZZNS9WUmhGRlFiUUt5NUEKLS0tIEdWOGtqSVR2L1owQzFoc1RIOHhl
+            VmVsUXpvS0ZxSXF6QnduOGliTzhhWlkKA/LjbmSkw4roYyNWI7SFCIurcfEOsnY9
+            9i47E3CJ/AQyubxBlGs/vAse4RCAt2Rdhbfv+WjlzXwM9Z06PZ+j6A==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-03-07T17:30:14Z"
+    mac: ENC[AES256_GCM,data:pyVLE/QWnXcqrSxX/m5cN+7mULETE3PDru75HazmKPJr/t5/aFqHLFD2OI2BCut5bkYg12X83stUi32ARUAl1zlpY/9AZxX2b9oXX5Rbw0ZO78jWK4jR8Fwqap65Pq1Sc3EJjvtPnfsTX3/pcR9FWqN4A+leXk0Vx5fjGqy0jKY=,iv:bTcu2vadVxwos73763iUOUjBMu6ISfG4nTJhUq0l6fo=,tag:2kamoJYXHYDmBrTo2PHJ5A==,type:str]
+    encrypted_regex: ^(data|stringData)$
+    version: 3.12.1

@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: splitwise-export
+spec:
+  selector:
+    matchLabels:
+      app: splitwise-export
+  template:
+    metadata:
+      labels:
+        app: splitwise-export
+    spec:
+      containers:
+        - name: web
+          env:
+            - name: EXPORT_VERSION
+              value: release-vprod

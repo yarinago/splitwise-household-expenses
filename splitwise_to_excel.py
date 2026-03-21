@@ -1073,6 +1073,26 @@ def _append_version_to_filename(path: str, version_label: str) -> str:
     return f"{base}{suffix}{ext}"
 
 
+def _set_github_output(name: str, value: str) -> None:
+    github_output_path = (os.getenv("GITHUB_OUTPUT") or "").strip()
+    if not github_output_path:
+        return
+
+    delimiter = f"EOF_{name}"
+    while delimiter in value:
+        delimiter = f"{delimiter}_X"
+
+    with open(github_output_path, "a", encoding="utf-8") as f:
+        f.write(f"{name}<<{delimiter}\n{value}\n{delimiter}\n")
+
+
+def publish_github_actions_outputs(group_name: str, group_id: int, out_path: str) -> None:
+    _set_github_output("group_name", group_name)
+    _set_github_output("group_id", str(group_id))
+    _set_github_output("output_path", out_path)
+    _set_github_output("output_name", os.path.basename(out_path))
+
+
 def send_export_email_if_configured(out_path: str, group_name: str, group_id: int, version_label: str) -> None:
     send_to_raw = os.getenv("SEND_TO_EMAIL", "").strip()
     if not send_to_raw:
@@ -1155,7 +1175,8 @@ def main():
 
     sw = make_client(client_id, client_secret, token)
     group = fetch_group(sw, group_id)
-    print(f"Group '{group.getName()}' (id={group_id})")
+    group_name = group.getName()
+    print(f"Group '{group_name}' (id={group_id})")
 
     # Fill per-member "owes" summary from group balances (simplified debts)
     GLOBAL_MEMBER_OWES_SUM.clear()
@@ -1208,7 +1229,8 @@ def main():
     # Write workbook (Raw_Shares optional)
     shares_out = None if args.no_raw_shares else person_rows_df
     write_excel(out_path, raw_wide, pivot, mom, person_pivot, shares_out)
-    send_export_email_if_configured(out_path, group.getName(), group_id, version_label)
+    publish_github_actions_outputs(group_name, group_id, out_path)
+    send_export_email_if_configured(out_path, group_name, group_id, version_label)
 
     print(f"Export complete -> {out_path}")
     if not raw_wide.empty and raw_wide.get("currency", pd.Series()).nunique() > 1:
