@@ -164,8 +164,8 @@ This workflow automates Docker image builds and publishing for both development 
 ## Kubernetes Layout
 
 - `k8s/base`: shared manifests (`Deployment` + `Service` + `ConfigMap`)
-- `k8s/overlays/dev`: development overrides + `secret.enc.yaml` + `secret-generator.yaml`
-- `k8s/overlays/prod`: production overrides + `secret.enc.yaml` + `secret-generator.yaml`
+- `k8s/overlays/dev`: development overrides + ingress + `secret.enc.yaml` + `secret-generator.yaml`
+- `k8s/overlays/prod`: production overrides + ingress + `secret.enc.yaml` + `secret-generator.yaml`
 
 Render test (requires `ksops` plugin support):
 ```bash
