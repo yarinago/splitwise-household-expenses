@@ -1,0 +1,21 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: splitwise-household-expenses-dev
+  annotations:
+    argocd.argoproj.io/ignore-healthcheck: "true"
+    argocd.argoproj.io/ignore-default-links: "true"
+    link.argocd.argoproj.io/external-link: http://splitwise.localtest.me:8080
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: splitwise.localtest.me
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: splitwise-export
+                port:
+                  number: 80
