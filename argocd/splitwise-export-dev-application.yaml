@@ -10,7 +10,7 @@ spec:
   project: splitwise-household-expenses
   source:
     repoURL: https://github.com/yarinago/splitwise-household-expenses.git
-    targetRevision: main
+    targetRevision: develop
     path: k8s/overlays/dev
   destination:
     server: https://kubernetes.default.svc

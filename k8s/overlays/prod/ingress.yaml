@@ -5,11 +5,11 @@ metadata:
   annotations:
     argocd.argoproj.io/ignore-healthcheck: "true"
     argocd.argoproj.io/ignore-default-links: "true"
-    link.argocd.argoproj.io/external-link: http://splitwise-prod.localtest.me:8080
+    link.argocd.argoproj.io/external-link: http://splitwise.localtest.me:8080
 spec:
   ingressClassName: traefik
   rules:
-    - host: splitwise-prod.localtest.me
+    - host: splitwise.localtest.me
       http:
         paths:
           - path: /
