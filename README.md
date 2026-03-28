@@ -10,6 +10,20 @@ The app now runs as a web service that computes Splitwise data in the background
 
 The container image is generic. Every user must provide their own Splitwise credentials and group/member configuration at runtime.
 
+## Table of Contents
+
+- [Legacy Excel Export](#legacy-excel-export)
+- [Local Run](#local-run)
+- [Run With Docker Image](#run-with-docker-image)
+- [Background Compute Model](#background-compute-model)
+- [CI Image Build](#ci-image-build)
+- [Kubernetes Layout](#kubernetes-layout)
+- [Argo CD: App-Of-Apps](#argo-cd-app-of-apps)
+- [ArgoCD Deployment With Your Own Secrets](#argocd-deployment-with-your-own-secrets)
+- [Using Your Own Secrets and Age Keys](#using-your-own-secrets-and-age-keys)
+- [Git-Encrypted Runtime Config (SOPS/Age)](#git-encrypted-runtime-config-sopsage)
+  - [Migration From Existing GitHub Vars/Secrets](#migration-from-existing-github-varssecrets)
+
 ## Legacy Excel Export
 
 The legacy flow is still supported for backward compatibility:
@@ -55,6 +69,40 @@ python splitwise_to_excel.py
 </details>
 
 ## Local Run
+<details>
+<summary><strong>How To Retrieve The Splitwise `.env` Values</strong></summary>
+
+Before filling the `.env`, create your own Splitwise application and token:
+
+1. Log in to Splitwise on the **web**.
+2. Click your profile picture, then go to `Your account` -> `Your apps` -> `Register your applications`.
+3. Enter an application name and description.
+4. For local usage, set both `Homepage URL` and `Callback URL` to `http://localhost:8765/callback`.
+5. After the application is created, copy the values into your `.env`:
+
+   - `Consumer Key` -> `SPLITWISE_CLIENT_ID`
+   - `Consumer Secret` -> `SPLITWISE_CLIENT_SECRET`
+   - `Your API key` -> the value used in `"access_token":"your-api-key"` inside `SPLITWISE_ACCESS_TOKEN_JSON`
+
+Use `Your API key` like this:
+
+```bash
+SPLITWISE_ACCESS_TOKEN_JSON={"access_token":"your-api-key","token_type":"bearer","refresh_token":""}
+```
+
+To retrieve the group id and member ids/names:
+
+1. Log in to Splitwise on the **web** and open the group you want to use.
+2. The number in the group URL is the group id. Put that value in `SPLITWISE_GROUP_ID`.
+3. While still logged in, open `https://secure.splitwise.com/api/v3.0/get_group/{id}` in your browser and replace `{id}` with your real group id.
+4. In the response, look under `members` to find each member's name and id.
+5. Build `SPLITWISE_MEMBERS` as a JSON object mapping each member id to the name you want displayed, for example:
+
+```bash
+SPLITWISE_MEMBERS={"98765432":"Ally","12312312":"Bob"}
+```
+
+</details></br>
 
 1. Install dependencies:
 ```bash
@@ -65,7 +113,7 @@ pip install -r requirements.txt
 ```bash
 SPLITWISE_CLIENT_ID=...
 SPLITWISE_CLIENT_SECRET=...
-SPLITWISE_ACCESS_TOKEN_JSON={"access_token":"...","token_type":"bearer","refresh_token":"..."}
+SPLITWISE_ACCESS_TOKEN_JSON={"access_token":"...","token_type":"bearer","refresh_token":""}
 SPLITWISE_GROUP_ID=12345678
 SPLITWISE_MEMBERS={"98765432":"Ally","12312312":"Bob"}
 SPLITWISE_FIRST_MONTH=2008-01
@@ -78,7 +126,9 @@ SPLITWISE_LOAD_DOTENV=1
 PORT=8080
 ```
 
-`.env` is optional and intended for local development. In Kubernetes / ArgoCD, values should come from manifests in this repo (`ConfigMap` + encrypted `Secret` files).
+
+`.env` is optional and intended for local development. </br>
+In Kubernetes / ArgoCD, values should come from manifests in this repo (`ConfigMap` + encrypted `Secret` files).
 
 3. Run the web app:
 ```bash
@@ -91,6 +141,40 @@ http://localhost:8080
 ```
 
 ## Run With Docker Image
+<details>
+<summary><strong>How To Retrieve The Splitwise `.env` Values</strong></summary>
+
+Before filling the `.env`, create your own Splitwise application and token:
+
+1. Log in to Splitwise on the **web**.
+2. Click your profile picture, then go to `Your account` -> `Your apps` -> `Register your applications`.
+3. Enter an application name and description.
+4. For local usage, set both `Homepage URL` and `Callback URL` to `http://localhost:8765/callback`.
+5. After the application is created, copy the values into your `.env`:
+
+   - `Consumer Key` -> `SPLITWISE_CLIENT_ID`
+   - `Consumer Secret` -> `SPLITWISE_CLIENT_SECRET`
+   - `Your API key` -> the value used in `"access_token":"your-api-key"` inside `SPLITWISE_ACCESS_TOKEN_JSON`
+
+Use `Your API key` like this:
+
+```bash
+SPLITWISE_ACCESS_TOKEN_JSON={"access_token":"your-api-key","token_type":"bearer","refresh_token":""}
+```
+
+To retrieve the group id and member ids/names:
+
+1. Log in to Splitwise on the **web** and open the group you want to use.
+2. The number in the group URL is the group id. Put that value in `SPLITWISE_GROUP_ID`.
+3. While still logged in, open `https://secure.splitwise.com/api/v3.0/get_group/{id}` in your browser and replace `{id}` with your real group id.
+4. In the response, look under `members` to find each member's name and id.
+5. Build `SPLITWISE_MEMBERS` as a JSON object mapping each member id to the name you want displayed, for example:
+
+```bash
+SPLITWISE_MEMBERS={"98765432":"Ally","12312312":"Bob"}
+```
+
+</details></br>
 
 Anyone can run the published image with their own values.
 
@@ -100,7 +184,7 @@ docker run --rm -p 8080:8080 \
   -e SPLITWISE_LOAD_DOTENV=0 \
   -e SPLITWISE_CLIENT_ID="your-client-id" \
   -e SPLITWISE_CLIENT_SECRET="your-client-secret" \
-  -e SPLITWISE_ACCESS_TOKEN_JSON='{"access_token":"...","token_type":"bearer","refresh_token":"..."}' \
+  -e SPLITWISE_ACCESS_TOKEN_JSON='{"access_token":"...","token_type":"bearer","refresh_token":""}' \
   -e SPLITWISE_GROUP_ID="12345678" \
   -e SPLITWISE_MEMBERS='{"11111111":"Alice","22222222":"Bob"}' \
   -e SPLITWISE_FIRST_MONTH="2008-01" \
