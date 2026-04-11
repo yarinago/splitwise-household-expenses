@@ -2,5 +2,9 @@ apiVersion: viaduct.ai/v1
 kind: ksops
 metadata:
   name: splitwise-export-config-generator
+  annotations:
+    config.kubernetes.io/function: |
+      exec:
+        path: ksops
 files:
   - configmap.yaml

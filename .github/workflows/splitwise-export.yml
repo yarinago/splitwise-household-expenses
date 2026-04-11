@@ -1,3 +1,4 @@
+# ============ Exports Splitwise household expenses to an Excel file ============
 name: Splitwise Export
 
 on:
