@@ -60,7 +60,7 @@ jobs:
         run: kubeconform -strict -summary -ignore-missing-schemas rendered/argocd.yaml rendered/dev.yaml rendered/prod.yaml
 
       - name: Trivy config scan for rendered manifests
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type: config
           scan-ref: rendered
@@ -70,7 +70,7 @@ jobs:
           format: table
 
       - name: Trivy config scan for Dockerfile
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type: config
           scan-ref: Dockerfile
