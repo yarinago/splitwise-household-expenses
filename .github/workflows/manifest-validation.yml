@@ -1,0 +1,80 @@
+name: Manifest Validation
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-manifests:
+    runs-on: ubuntu-latest
+    env:
+      SOPS_AGE_KEY: ${{ secrets.AGE_SECRET_KEY }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install YAML lint
+        run: pip install yamllint
+
+      - name: Lint YAML
+        run: yamllint .
+
+      - name: Set up Kustomize
+        uses: imranismail/setup-kustomize@v2
+        with:
+          kustomize-version: "5.4.3"
+
+      - name: Install KSOPS
+        shell: bash
+        run: curl -sSL https://raw.githubusercontent.com/viaduct-ai/kustomize-sops/master/scripts/install-ksops-archive.sh | sudo bash
+
+      - name: Render manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p rendered
+          command -v ksops
+          kustomize build argocd > rendered/argocd.yaml
+          kustomize build --enable-alpha-plugins --enable-exec k8s/overlays/dev > rendered/dev.yaml
+          kustomize build --enable-alpha-plugins --enable-exec k8s/overlays/prod > rendered/prod.yaml
+
+      - name: Install kubeconform
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="v0.6.7"
+          curl -sSL -o kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${version}/kubeconform-linux-amd64.tar.gz"
+          tar -xzf kubeconform.tar.gz kubeconform
+          sudo mv kubeconform /usr/local/bin/kubeconform
+
+      - name: Validate rendered manifests
+        run: kubeconform -strict -summary -ignore-missing-schemas rendered/argocd.yaml rendered/dev.yaml rendered/prod.yaml
+
+      - name: Trivy config scan for rendered manifests
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: config
+          scan-ref: rendered
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          hide-progress: true
+          format: table
+
+      - name: Trivy config scan for Dockerfile
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: config
+          scan-ref: Dockerfile
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          hide-progress: true
+          format: table
