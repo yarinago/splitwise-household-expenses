@@ -12,6 +12,13 @@ spec:
       labels:
         app.kubernetes.io/name: splitwise-export
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: tmp
+          emptyDir: {}
       containers:
         - name: web
           image: ghcr.io/yarinago/splitwise-household-expenses:latest
@@ -19,6 +26,9 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           env:
             - name: PORT
               value: "8080"
@@ -31,6 +41,15 @@ spec:
                 name: splitwise-export-config
             - secretRef:
                 name: splitwise-export-secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
           readinessProbe:
             httpGet:
               path: /healthz
