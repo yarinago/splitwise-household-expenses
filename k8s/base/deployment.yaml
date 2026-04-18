@@ -30,8 +30,12 @@ spec:
             - name: tmp
               mountPath: /tmp
           env:
+            - name: APP_MODE
+              value: "web"
             - name: PORT
               value: "8080"
+            - name: SPLITWISE_SNAPSHOT_BACKEND
+              value: "direct"
             - name: SPLITWISE_LOAD_DOTENV
               value: "0"
             - name: EXPORT_VERSION
