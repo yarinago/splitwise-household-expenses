@@ -124,10 +124,16 @@ refresh_runtime_config(load_env=False, require_members=False)
 try:
     from splitwise import Splitwise
     from splitwise.expense import Expense
+    from splitwise.exception import SplitwiseException
     from splitwise.group import Group
 except Exception:
     print("[!] Missing or outdated 'splitwise' package. Install/upgrade with: pip install -U splitwise", file=sys.stderr)
     raise
+
+try:
+    from requests.exceptions import RequestException
+except Exception:  # pragma: no cover - requests is a transitive dependency of splitwise
+    RequestException = Exception
 
 
 # ---------- Helpers ----------
@@ -175,8 +181,89 @@ def make_client(client_id: str, client_secret: str, token_json: Dict) -> "Splitw
     raise SystemExit("[!] Unrecognized token JSON for Splitwise.")
 
 
+def _unwrap_sdk_response_attr(value):
+    # The splitwise SDK stores response fields as single-item tuples.
+    if isinstance(value, tuple) and len(value) == 1:
+        return value[0]
+    return value
+
+
+def _splitwise_http_status(exc: Exception) -> Optional[int]:
+    raw = _unwrap_sdk_response_attr(getattr(exc, "http_status", None))
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _splitwise_http_body_preview(exc: Exception, limit: int = 240) -> str:
+    raw = _unwrap_sdk_response_attr(getattr(exc, "http_body", None))
+    if raw is None:
+        return ""
+    if isinstance(raw, (bytes, bytearray)):
+        text = raw.decode("utf-8", errors="replace")
+    else:
+        text = str(raw)
+    compact = " ".join(text.split())
+    return compact[:limit]
+
+
+def _retryable_splitwise_error(exc: Exception) -> bool:
+    if isinstance(exc, RequestException):
+        return True
+    if not isinstance(exc, SplitwiseException):
+        return False
+    status = _splitwise_http_status(exc)
+    return status is None or status in {408, 409, 425, 429, 500, 502, 503, 504}
+
+
+def _format_splitwise_error(exc: Exception) -> str:
+    status = _splitwise_http_status(exc)
+    body = _splitwise_http_body_preview(exc)
+    parts = [f"{exc.__class__.__name__}: {exc}"]
+    if status is not None:
+        parts.append(f"status={status}")
+    if body:
+        parts.append(f"body={body!r}")
+    return " | ".join(parts)
+
+
+def _splitwise_retry_attempts() -> int:
+    return max(_parse_int_env("SPLITWISE_API_RETRY_ATTEMPTS", 5), 1)
+
+
+def _splitwise_retry_base_delay_seconds() -> float:
+    raw = (os.getenv("SPLITWISE_API_RETRY_DELAY_SECONDS") or "2").strip()
+    try:
+        return max(float(raw), 0.5)
+    except ValueError:
+        return 2.0
+
+
+def run_splitwise_call(action: str, fn):
+    attempts = _splitwise_retry_attempts()
+    base_delay = _splitwise_retry_base_delay_seconds()
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if not _retryable_splitwise_error(exc) or attempt >= attempts:
+                raise RuntimeError(f"{action} failed after {attempt} attempt(s): {_format_splitwise_error(exc)}") from exc
+            delay_seconds = min(base_delay * (2 ** (attempt - 1)), 30.0)
+            print(
+                f"[warn] {action} failed on attempt {attempt}/{attempts}: "
+                f"{_format_splitwise_error(exc)}. Retrying in {delay_seconds:.1f}s..."
+            )
+            time.sleep(delay_seconds)
+
+
 def fetch_group(sw: Splitwise, group_id: int) -> Group:
-    g = sw.getGroup(group_id)
+    g = run_splitwise_call(
+        action=f"fetch group {group_id}",
+        fn=lambda: sw.getGroup(group_id),
+    )
     if not g:
         raise ValueError(f"Group id {group_id} not found")
     return g
@@ -188,7 +275,16 @@ def fetch_expenses_all_history(sw: Splitwise, group_id: int, start_ym: str, end_
         start_iso, end_iso = month_bounds(ym)
         offset = 0
         while True:
-            chunk = sw.getExpenses(group_id=group_id, dated_after=start_iso, dated_before=end_iso, offset=offset)
+            chunk = run_splitwise_call(
+                action=f"fetch expenses for month={ym} offset={offset}",
+                fn=lambda: sw.getExpenses(
+                    group_id=group_id,
+                    dated_after=start_iso,
+                    dated_before=end_iso,
+                    offset=offset,
+                    limit=20,
+                ),
+            )
             if not chunk:
                 break
             expenses.extend(chunk)
