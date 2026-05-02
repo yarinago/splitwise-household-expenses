@@ -158,9 +158,9 @@ def extract_simplified_debts(group) -> List[Any]:
 
 
 def debt_direction_mode() -> str:
-    mode = (os.getenv("SPLITWISE_DEBT_DIRECTION", "reverse") or "reverse").strip().lower()
+    mode = (os.getenv("SPLITWISE_DEBT_DIRECTION", "normal") or "normal").strip().lower()
     if mode not in {"normal", "reverse"}:
-        return "reverse"
+        return "normal"
     return mode
 
 
@@ -171,7 +171,7 @@ def person_owes_direction_mode() -> str:
         or debt_direction_mode()
     )
     if mode not in {"normal", "reverse"}:
-        return "reverse"
+        return "normal"
     return mode
 
 

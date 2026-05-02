@@ -202,8 +202,8 @@ def _extract_simplified_debts(group: Any) -> List[Any]:
 
 
 def _debt_direction_mode() -> str:
-    mode = (os.getenv("SPLITWISE_DEBT_DIRECTION", "reverse") or "reverse").strip().lower()
-    return mode if mode in {"normal", "reverse"} else "reverse"
+    mode = (os.getenv("SPLITWISE_DEBT_DIRECTION", "normal") or "normal").strip().lower()
+    return mode if mode in {"normal", "reverse"} else "normal"
 
 
 def build_debt_edges(group: Any, id_to_name: Dict[int, str]) -> List[Dict[str, Any]]:
