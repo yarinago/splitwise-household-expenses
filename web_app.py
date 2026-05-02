@@ -24,6 +24,11 @@ def should_load_dotenv() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def should_eager_initialize() -> bool:
+    raw = (os.getenv("SPLITWISE_EAGER_INIT", "1") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 def load_runtime_env() -> None:
     # Local developer convenience; CI/K8s/ArgoCD can disable this with SPLITWISE_LOAD_DOTENV=0.
     if should_load_dotenv():
@@ -33,8 +38,8 @@ def load_runtime_env() -> None:
 
 def resolve_app_version() -> str:
     return (
-        (os.getenv("APP_VERSION") or "").strip()
-        or (os.getenv("EXPORT_VERSION") or "").strip()
+        core.getenv_text("APP_VERSION")
+        or core.getenv_text("EXPORT_VERSION")
         or "unknown"
     )
 
@@ -518,19 +523,19 @@ def build_dashboard_snapshot(max_recent_rows: int) -> Dict[str, Any]:
     if not core.MEMBER_ID_TO_NAME:
         raise RuntimeError("SPLITWISE_MEMBERS is required.")
 
-    group_id = core.DEFAULT_GROUP_ID or int(os.getenv("SPLITWISE_GROUP_ID", "0") or "0")
+    group_id = core.DEFAULT_GROUP_ID or int(core.getenv_text("SPLITWISE_GROUP_ID", "0") or "0")
     if not group_id:
         raise RuntimeError("SPLITWISE_GROUP_ID is required.")
 
-    client_id = (os.getenv("SPLITWISE_CLIENT_ID") or "").strip()
-    client_secret = (os.getenv("SPLITWISE_CLIENT_SECRET") or "").strip()
-    token_raw = os.getenv("SPLITWISE_ACCESS_TOKEN_JSON")
+    client_id = core.getenv_text("SPLITWISE_CLIENT_ID")
+    client_secret = core.getenv_text("SPLITWISE_CLIENT_SECRET")
+    token_raw = core.getenv_text("SPLITWISE_ACCESS_TOKEN_JSON")
     if not client_id or not client_secret or not token_raw:
         raise RuntimeError(
             "Missing credentials: SPLITWISE_CLIENT_ID, SPLITWISE_CLIENT_SECRET, SPLITWISE_ACCESS_TOKEN_JSON."
         )
 
-    start_ym = (os.getenv("SPLITWISE_FIRST_MONTH", core.FIRST_MONTH) or "2008-01").strip()
+    start_ym = core.getenv_text("SPLITWISE_FIRST_MONTH", core.FIRST_MONTH) or "2008-01"
     end_ym = core.ym_today()
     try:
         token = core.resolve_token(token_raw)
@@ -956,6 +961,18 @@ def get_state() -> Any:
             _state.start()
         return _state
 
+
+def log_web_startup() -> None:
+    print(
+        "[splitwise-web] "
+        f"backend={snapshot_backend_mode()} "
+        f"refresh_seconds={REFRESH_SECONDS} "
+        f"max_recent_rows={MAX_RECENT_ROWS} "
+        f"table_limit={TABLE_LIMIT} "
+        f"eager_init={should_eager_initialize()} "
+        f"version={APP_VERSION}"
+    )
+
 app = Flask(__name__)
 
 
@@ -1052,8 +1069,12 @@ def readyz():
     return jsonify({"status": "ready", "last_refresh_finished": model["last_refresh_finished"]})
 
 
-if __name__ == "__main__":
+log_web_startup()
+if should_eager_initialize():
     get_state()
+
+
+if __name__ == "__main__":
     host = os.getenv("SPLITWISE_APP_HOST", "0.0.0.0").strip() or "0.0.0.0"
     port = int_env("PORT", default=8080, minimum=1)
     app.run(host=host, port=port)

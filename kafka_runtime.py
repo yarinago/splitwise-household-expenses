@@ -337,19 +337,19 @@ def _fetch_splitwise_dataset() -> Dict[str, Any]:
     if not core.MEMBER_ID_TO_NAME:
         raise RuntimeError("SPLITWISE_MEMBERS is required for Kafka producer mode.")
 
-    group_id = core.DEFAULT_GROUP_ID or int(os.getenv("SPLITWISE_GROUP_ID", "0") or "0")
+    group_id = core.DEFAULT_GROUP_ID or int(core.getenv_text("SPLITWISE_GROUP_ID", "0") or "0")
     if not group_id:
         raise RuntimeError("SPLITWISE_GROUP_ID is required for Kafka producer mode.")
 
-    client_id = (os.getenv("SPLITWISE_CLIENT_ID") or "").strip()
-    client_secret = (os.getenv("SPLITWISE_CLIENT_SECRET") or "").strip()
-    token_raw = os.getenv("SPLITWISE_ACCESS_TOKEN_JSON")
+    client_id = core.getenv_text("SPLITWISE_CLIENT_ID")
+    client_secret = core.getenv_text("SPLITWISE_CLIENT_SECRET")
+    token_raw = core.getenv_text("SPLITWISE_ACCESS_TOKEN_JSON")
     if not client_id or not client_secret or not token_raw:
         raise RuntimeError(
             "Missing credentials: SPLITWISE_CLIENT_ID, SPLITWISE_CLIENT_SECRET, SPLITWISE_ACCESS_TOKEN_JSON."
         )
 
-    start_ym = (os.getenv("SPLITWISE_FIRST_MONTH", core.FIRST_MONTH) or "2008-01").strip()
+    start_ym = core.getenv_text("SPLITWISE_FIRST_MONTH", core.FIRST_MONTH) or "2008-01"
     end_ym = core.ym_today()
     token = core.resolve_token(token_raw)
     sw = core.make_client(client_id, client_secret, token)
