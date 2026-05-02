@@ -12,6 +12,7 @@ The container image is generic. Every user must provide their own Splitwise cred
 
 ## Table of Contents
 
+- [Architecture Overview](#architecture-overview)
 - [Legacy Excel Export](#legacy-excel-export)
 - [Local Run](#local-run)
 - [Run With Docker Image](#run-with-docker-image)
@@ -24,7 +25,41 @@ The container image is generic. Every user must provide their own Splitwise cred
 - [Git-Encrypted Runtime Config (SOPS/Age)](#git-encrypted-runtime-config-sopsage)
   - [Migration From Existing GitHub Vars/Secrets](#migration-from-existing-github-varssecrets)
 
+## Architecture Overview
+
+```mermaid
+flowchart LR
+    subgraph modes["Run Modes"]
+        direction TB
+        A["1  Legacy Script<br/>splitwise_to_excel.py"]
+        B["2  Local Web App<br/>web_app.py"]
+        C["3  Docker Container<br/>ghcr.io image"]
+        D["4  Kubernetes<br/>kustomize overlays"]
+        E["5  ArgoCD<br/>app-of-apps"]
+    end
+
+    A & B & C & D <-->|OAuth2| API[(Splitwise API)]
+    E -->|manages| D
+```
+
 ## Legacy Excel Export
+
+```mermaid
+flowchart LR
+    subgraph triggers["Trigger"]
+        GHA["GitHub Actions<br/>Scheduled / Manual"]
+        Local["Local Terminal"]
+    end
+
+    Script["splitwise_to_excel.py"]
+
+    GHA --> Script
+    Local --> Script
+    Script <-->|OAuth2| API[(Splitwise API)]
+    Script --> Excel["Excel Workbook .xlsx"]
+    Excel --> Artifact["GitHub Artifact<br/>CI only"]
+    Excel --> Email["Email via SMTP<br/>optional"]
+```
 
 The legacy flow is still supported for backward compatibility:
 - Script: `splitwise_to_excel.py`
@@ -69,6 +104,16 @@ python splitwise_to_excel.py
 </details>
 
 ## Local Run
+
+```mermaid
+flowchart LR
+    Env[".env file<br/>env vars"] -->|loaded at startup| App["web_app.py<br/>Flask + Gunicorn"]
+    App -->|"background thread<br/>every 900s"| API[(Splitwise API)]
+    API -->|expense data| Cache["In-Memory Cache<br/>snapshot"]
+    Cache -->|served from| App
+    Browser["Browser<br/>localhost:8080"] <-->|HTTP| App
+```
+
 <details>
 <summary><strong>How To Retrieve The Splitwise `.env` Values</strong></summary>
 
@@ -141,6 +186,19 @@ http://localhost:8080
 ```
 
 ## Run With Docker Image
+
+```mermaid
+flowchart LR
+    Env["docker run -e ENV=...<br/>env vars"] -->|injected| Container
+
+    subgraph Container["Docker Container (ghcr.io image)"]
+        Gunicorn["Gunicorn WSGI"] --> WebApp["web_app.py"]
+    end
+
+    WebApp <-->|"background OAuth2"| API[(Splitwise API)]
+    Browser["Browser<br/>localhost:8080"] <-->|HTTP| Container
+```
+
 <details>
 <summary><strong>How To Retrieve The Splitwise `.env` Values</strong></summary>
 
@@ -233,7 +291,24 @@ Optional runtime variables:
 
 ## CI Image Build
 
+```mermaid
+flowchart LR
+    subgraph triggers["Git Event"]
+        PR["Pull Request<br/>validate only, no push"]
+        Dev["Push to develop<br/>tags: latest, changelog, run-id"]
+        Tag["Git tag release-v*<br/>tag: semver version"]
+        ProdTag["Git tag release-vprod*<br/>tags: semver + prod"]
+    end
 
+    Build["GitHub Actions<br/>Build + inject APP_VERSION"]
+    Registry["GHCR<br/>ghcr.io/yarinago/splitwise-household-expenses"]
+
+    PR --> Build
+    Dev --> Build
+    Tag --> Build
+    ProdTag --> Build
+    Build -->|"push except PR"| Registry
+```
 
 Workflow: `.github/workflows/splitwise-image-build.yml`
 
@@ -247,6 +322,27 @@ This workflow automates Docker image builds and publishing for both development 
 
 ## Kubernetes Layout
 
+```mermaid
+flowchart TD
+    subgraph repo["Git Repository"]
+        Base["k8s/base/<br/>Deployment, Service, ConfigMap"]
+        DevOverlay["k8s/overlays/dev<br/>namespace: splitwise-dev<br/>image: latest"]
+        ProdOverlay["k8s/overlays/prod<br/>namespace: splitwise<br/>image: prod"]
+    end
+
+    Base --> DevOverlay & ProdOverlay
+
+    DevOverlay -->|"kustomize build + KSOPS decrypt"| DevNS
+    ProdOverlay -->|"kustomize build + KSOPS decrypt"| ProdNS
+
+    subgraph cluster["Kubernetes Cluster"]
+        DevNS["splitwise-dev<br/>Pod → Ingress<br/>splitwise-dev.localtest.me"]
+        ProdNS["splitwise<br/>Pod → Ingress<br/>splitwise.localtest.me"]
+    end
+
+    DevNS & ProdNS <-->|OAuth2| API[(Splitwise API)]
+```
+
 - `k8s/base`: shared manifests (`Deployment` + `Service` + `ConfigMap`)
 - `k8s/overlays/dev`: development overrides + ingress + `secret.enc.yaml` + `secret-generator.yaml`
 - `k8s/overlays/prod`: production overrides + ingress + `secret.enc.yaml` + `secret-generator.yaml`
@@ -258,6 +354,33 @@ kustomize build --enable-alpha-plugins --enable-exec k8s/overlays/dev
 ```
 
 ## Argo CD: App-Of-Apps
+
+```mermaid
+flowchart TD
+    subgraph ext["External Argo Repo"]
+        Parent["Parent Application<br/>splitwise-export-bootstrap"]
+    end
+
+    subgraph thisrepo["This Repository"]
+        ArgoPath["argocd/<br/>kustomization.yaml"]
+        DevApp["splitwise-export-dev<br/>Application CRD"]
+        ProdApp["splitwise-export-prod<br/>Application CRD"]
+        DevOverlay["k8s/overlays/dev<br/>develop branch"]
+        ProdOverlay["k8s/overlays/prod<br/>main branch"]
+    end
+
+    subgraph cluster["Kubernetes Cluster"]
+        DevNS["splitwise-dev<br/>namespace"]
+        ProdNS["splitwise<br/>namespace"]
+    end
+
+    Parent -->|"watches argocd/ path"| ArgoPath
+    ArgoPath -->|creates| DevApp & ProdApp
+    DevApp -->|"auto-syncs develop"| DevOverlay
+    ProdApp -->|"auto-syncs main"| ProdOverlay
+    DevOverlay -->|deploys| DevNS
+    ProdOverlay -->|deploys| ProdNS
+```
 
 This repo contains:
 - `argocd/kustomization.yaml`
