@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import traceback
 import hashlib
 from datetime import datetime, timezone
@@ -13,7 +14,7 @@ from urllib.parse import urlsplit
 import pandas as pd
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, redirect, render_template, request, url_for
-from prometheus_client import CONTENT_TYPE_LATEST, Gauge, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
 
 import read_model
 import splitwise_to_excel as core
@@ -101,16 +102,54 @@ WEB_PENDING_REFRESH_REQUESTS = Gauge(
     "Pending manual refresh requests stored in the read model.",
 )
 
+# Business metrics
+WEB_TOTAL_EXPENSE_AMOUNT = Gauge(
+    "splitwise_total_expense_amount",
+    "Total sum of all tracked expense amounts.",
+)
+WEB_TRACKED_MONTHS = Gauge(
+    "splitwise_tracked_months_total",
+    "Number of months tracked in the current snapshot.",
+)
+WEB_MEMBER_OWES = Gauge(
+    "splitwise_member_owes",
+    "Total amount a member owes across all tracked expenses.",
+    ["member"],
+)
+WEB_MEMBER_RECEIVES = Gauge(
+    "splitwise_member_receives",
+    "Total amount a member is owed across all tracked expenses.",
+    ["member"],
+)
+
+# Operational metrics
+WEB_REFRESH_DURATION = Gauge(
+    "splitwise_refresh_duration_seconds",
+    "Duration of the last completed data refresh in seconds.",
+)
+WEB_REFRESH_ERRORS = Counter(
+    "splitwise_refresh_errors_total",
+    "Number of failed Splitwise data refresh attempts.",
+)
+
 
 def update_web_metrics(model: Dict[str, Any]) -> None:
     snapshot = model.get("snapshot")
     if snapshot is None:
         WEB_SNAPSHOT_EXPENSE_COUNT.set(0)
         WEB_SNAPSHOT_LAST_GENERATED_UNIX.set(0)
+        WEB_TOTAL_EXPENSE_AMOUNT.set(0)
+        WEB_TRACKED_MONTHS.set(0)
     else:
         summary = snapshot.get("summary", {})
         WEB_SNAPSHOT_EXPENSE_COUNT.set(int(summary.get("expense_count") or 0))
         WEB_SNAPSHOT_LAST_GENERATED_UNIX.set(iso_to_unix(snapshot.get("generated_at")))
+        WEB_TOTAL_EXPENSE_AMOUNT.set(float(summary.get("total_expenses") or 0))
+        WEB_TRACKED_MONTHS.set(len(snapshot.get("months") or []))
+        for balance in snapshot.get("member_balances") or []:
+            member = str(balance.get("name") or "unknown")
+            WEB_MEMBER_OWES.labels(member=member).set(float(balance.get("owes") or 0))
+            WEB_MEMBER_RECEIVES.labels(member=member).set(float(balance.get("to_receive") or 0))
     WEB_PENDING_REFRESH_REQUESTS.set(int(model.get("pending_refresh_count") or 0))
 
 
@@ -812,15 +851,18 @@ class DashboardState:
 
         snapshot: Optional[Dict[str, Any]] = None
         error: Optional[str] = None
+        t0 = time.monotonic()
         try:
             snapshot = build_dashboard_snapshot(self.max_recent_rows)
         except Exception as exc:
             error = f"{exc.__class__.__name__}: {exc}"
             traceback.print_exc()
+            WEB_REFRESH_ERRORS.inc()
 
         with self._lock:
             if snapshot is not None:
                 self._snapshot = snapshot
+                WEB_REFRESH_DURATION.set(time.monotonic() - t0)
             self._last_error = error
             self._last_refresh_finished = utc_now_iso()
             self._refresh_in_progress = False
