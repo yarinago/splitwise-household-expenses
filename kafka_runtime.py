@@ -276,11 +276,12 @@ def _shares_for_expense(shares_df: pd.DataFrame, expense_id: int) -> List[Dict[s
     return rows
 
 
-def _expense_event_payload(row: pd.Series, shares_df: pd.DataFrame, group_id: int) -> Dict[str, Any]:
+def _expense_event_payload(row: pd.Series, shares_df: pd.DataFrame, group_id: int, action_type: str = "CREATE") -> Dict[str, Any]:
     expense_id = int(row["expense_id"])
     payload = {
         "schema_version": 1,
         "event_type": "expense_upsert",
+        "action_type": action_type,
         "emitted_at": utc_now_iso(),
         "group_id": group_id,
         "expense": {
@@ -332,15 +333,26 @@ def _delete_event_payload(group_id: int, expense_id: int) -> Dict[str, Any]:
     }
 
 
-def _fetch_splitwise_dataset() -> Dict[str, Any]:
+def _classify_action_type(expense: Any) -> str:
+    """Classify a raw Splitwise expense object as DELETE, CREATE, or UPDATE."""
+    deleted_at = _safe_attr(expense, "getDeletedAt")
+    if deleted_at:
+        return "DELETE"
+    created_at = str(_safe_attr(expense, "getCreatedAt") or "")
+    updated_at = str(_safe_attr(expense, "getUpdatedAt") or "")
+    if created_at and updated_at and updated_at > created_at:
+        return "UPDATE"
+    return "CREATE"
+
+
+def _splitwise_connect() -> Tuple[Any, int, Any]:
+    """Initialize Splitwise client; returns (sw_client, group_id, group_obj)."""
     core.refresh_runtime_config(load_env=False, require_members=False)
     if not core.MEMBER_ID_TO_NAME:
         raise RuntimeError("SPLITWISE_MEMBERS is required for Kafka producer mode.")
-
     group_id = core.DEFAULT_GROUP_ID or int(core.getenv_text("SPLITWISE_GROUP_ID", "0") or "0")
     if not group_id:
         raise RuntimeError("SPLITWISE_GROUP_ID is required for Kafka producer mode.")
-
     client_id = core.getenv_text("SPLITWISE_CLIENT_ID")
     client_secret = core.getenv_text("SPLITWISE_CLIENT_SECRET")
     token_raw = core.getenv_text("SPLITWISE_ACCESS_TOKEN_JSON")
@@ -348,12 +360,16 @@ def _fetch_splitwise_dataset() -> Dict[str, Any]:
         raise RuntimeError(
             "Missing credentials: SPLITWISE_CLIENT_ID, SPLITWISE_CLIENT_SECRET, SPLITWISE_ACCESS_TOKEN_JSON."
         )
-
-    start_ym = core.getenv_text("SPLITWISE_FIRST_MONTH", core.FIRST_MONTH) or "2008-01"
-    end_ym = core.ym_today()
     token = core.resolve_token(token_raw)
     sw = core.make_client(client_id, client_secret, token)
     group = core.fetch_group(sw, group_id)
+    return sw, group_id, group
+
+
+def _fetch_splitwise_dataset() -> Dict[str, Any]:
+    sw, group_id, group = _splitwise_connect()
+    start_ym = core.getenv_text("SPLITWISE_FIRST_MONTH", core.FIRST_MONTH) or "2008-01"
+    end_ym = core.ym_today()
     expenses = core.fetch_expenses_all_history(sw, group_id, start_ym, end_ym)
     raw_df = core.normalize_expenses(expenses)
     shares_df = core.normalize_person_shares(expenses)
@@ -472,15 +488,101 @@ def run_producer_once() -> Dict[str, int]:
     return counts
 
 
+def _run_producer_incremental(updated_after_iso: str) -> Dict[str, int]:
+    """Fetch only expenses changed since updated_after_iso and emit one event per change."""
+    sw, group_id, group = _splitwise_connect()
+    raw_expenses = core.fetch_expenses_updated_after(sw, group_id, updated_after_iso)
+
+    messages: List[Tuple[str, Dict[str, Any]]] = []
+
+    for expense in raw_expenses:
+        action_type = _classify_action_type(expense)
+        expense_id_raw = _safe_attr(expense, "getId")
+        if not expense_id_raw:
+            continue
+        expense_id = int(expense_id_raw)
+
+        if action_type == "DELETE":
+            messages.append((f"expense:{expense_id}", _delete_event_payload(group_id, expense_id)))
+            continue
+
+        # Skip payments/transfers (same filter as normalize_expenses)
+        category_name = str(_safe_attr(_safe_attr(expense, "getCategory"), "getName") or "Uncategorized")
+        if "payment" in category_name.lower() or "transfer" in category_name.lower():
+            continue
+
+        date = str(_safe_attr(expense, "getDate") or "")
+        month = date[:7] if date else ""
+
+        # Apply exclusion rules (SPLITWISE_EXCLUDE_MONTHS + SPLITWISE_EXCLUDE_DESCRIPTIONS)
+        exclude_months_str = core.getenv_text("SPLITWISE_EXCLUDE_MONTHS") or ""
+        exclude_descs_str = core.getenv_text("SPLITWISE_EXCLUDE_DESCRIPTIONS") or ""
+        if exclude_months_str and exclude_descs_str:
+            months_to_drop = {m.strip() for m in exclude_months_str.split(",") if m.strip()}
+            desc_patterns = [d.strip().lower() for d in exclude_descs_str.split(",") if d.strip()]
+            desc = str(_safe_attr(expense, "getDescription") or "").lower()
+            if month in months_to_drop and any(p in desc for p in desc_patterns):
+                continue
+
+        try:
+            cost = round(float(_safe_attr(expense, "getCost", 0.0) or 0.0), 2)
+        except Exception:
+            cost = 0.0
+
+        shares_df = core.normalize_person_shares([expense])
+        payload = {
+            "schema_version": 1,
+            "event_type": "expense_upsert",
+            "action_type": action_type,
+            "emitted_at": utc_now_iso(),
+            "group_id": group_id,
+            "expense": {
+                "expense_id": expense_id,
+                "date": date,
+                "updated_at": str(_safe_attr(expense, "getUpdatedAt") or ""),
+                "month": month,
+                "description": str(_safe_attr(expense, "getDescription") or ""),
+                "category": category_name,
+                "amount": cost,
+                "currency": str(_safe_attr(expense, "getCurrencyCode") or ""),
+            },
+            "shares": _shares_for_expense(shares_df, expense_id),
+        }
+        messages.append((f"expense:{expense_id}", payload))
+
+    messages.append(
+        (
+            f"group:{group_id}",
+            _group_state_payload(
+                group_id=group_id,
+                group_name=str(group.getName()),
+                start_ym=core.getenv_text("SPLITWISE_FIRST_MONTH", core.FIRST_MONTH) or "2008-01",
+                end_ym=core.ym_today(),
+                debt_edges=build_debt_edges(group, core.MEMBER_ID_TO_NAME),
+            ),
+        )
+    )
+
+    counts = _send_messages(messages)
+    if messages:
+        read_model.mark_refresh_requests_handled()
+    return counts
+
+
 def run_producer_loop() -> None:
     _start_metrics_server()
     refresh_seconds = _read_int_env("SPLITWISE_REFRESH_SECONDS", default=900, minimum=30)
     while True:
-        started_at = utc_now_iso()
+        fetch_started_at = utc_now_iso()
         _set_producer_state("refresh_in_progress", True)
-        _set_producer_state("last_refresh_started", started_at)
+        _set_producer_state("last_refresh_started", fetch_started_at)
+
+        last_fetch_at = read_model.load_scope_state("producer").get("last_fetch_at")
         try:
-            counts = run_producer_once()
+            if last_fetch_at:
+                counts = _run_producer_incremental(str(last_fetch_at))
+            else:
+                counts = run_producer_once()
         except Exception as exc:
             PRODUCER_RUNS_TOTAL.labels(status="error").inc()
             _set_producer_state("last_error", f"{exc.__class__.__name__}: {exc}")
@@ -492,6 +594,7 @@ def run_producer_loop() -> None:
             _set_producer_state("last_error", "")
             _set_producer_state("last_refresh_finished", utc_now_iso())
             _set_producer_state("last_successful_refresh", utc_now_iso())
+            _set_producer_state("last_fetch_at", fetch_started_at)
             _set_producer_state("last_published_counts", counts)
             _set_producer_state("refresh_in_progress", False)
 

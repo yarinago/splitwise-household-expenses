@@ -209,6 +209,21 @@ def fetch_expenses_all_history(sw: Splitwise, group_id: int, start_ym: str, end_
     return expenses
 
 
+def fetch_expenses_updated_after(sw: Splitwise, group_id: int, updated_after_iso: str) -> list:
+    """Fetch all expenses (including deleted) updated after the given ISO timestamp."""
+    expenses = []
+    offset = 0
+    while True:
+        chunk = sw.getExpenses(group_id=group_id, updated_after=updated_after_iso, offset=offset)
+        if not chunk:
+            break
+        expenses.extend(chunk)
+        offset += len(chunk)
+        if len(chunk) < 20:
+            break
+    return expenses
+
+
 def _safe_attr(obj, getter_name: str, default=None):
     try:
         getter = getattr(obj, getter_name)
