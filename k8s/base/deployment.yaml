@@ -21,7 +21,8 @@ spec:
         - name: tmp
           emptyDir: {}
         - name: read-model
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: splitwise-read-model-pvc
       containers:
         - name: web
           image: ghcr.io/yarinago/splitwise-household-expenses:latest
