@@ -11,6 +11,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: splitwise-export
+        app.kubernetes.io/component: runtime
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -19,6 +20,8 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: read-model
+          emptyDir: {}
       containers:
         - name: web
           image: ghcr.io/yarinago/splitwise-household-expenses:latest
@@ -26,16 +29,15 @@ spec:
           ports:
             - name: http
               containerPort: 8080
-          volumeMounts:
-            - name: tmp
-              mountPath: /tmp
           env:
             - name: APP_MODE
               value: "web"
             - name: PORT
               value: "8080"
             - name: SPLITWISE_SNAPSHOT_BACKEND
-              value: "direct"
+              value: read_model
+            - name: SPLITWISE_READ_MODEL_DB
+              value: /data/splitwise-read-model.db
             - name: SPLITWISE_LOAD_DOTENV
               value: "0"
             - name: EXPORT_VERSION
@@ -45,6 +47,11 @@ spec:
                 name: splitwise-export-config
             - secretRef:
                 name: splitwise-export-secrets
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: read-model
+              mountPath: /data
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -68,6 +75,55 @@ spec:
             initialDelaySeconds: 20
             periodSeconds: 20
             timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+        - name: consumer
+          image: ghcr.io/yarinago/splitwise-household-expenses:latest
+          imagePullPolicy: Always
+          ports:
+            - name: con-metrics
+              containerPort: 9090
+          env:
+            - name: APP_MODE
+              value: consumer
+            - name: METRICS_PORT
+              value: "9090"
+            - name: SPLITWISE_READ_MODEL_DB
+              value: /data/splitwise-read-model.db
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: splitwise-kafka-kafka-bootstrap:9092
+            - name: KAFKA_TOPIC
+              value: splitwise.expenses.v1
+            - name: KAFKA_GROUP_ID
+              value: splitwise-dashboard-materializer
+            - name: KAFKA_AUTO_OFFSET_RESET
+              value: earliest
+            - name: SPLITWISE_LOAD_DOTENV
+              value: "0"
+          envFrom:
+            - configMapRef:
+                name: splitwise-export-config
+            - secretRef:
+                name: splitwise-export-secrets
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: read-model
+              mountPath: /data
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
           resources:
             requests:
               cpu: 100m
