@@ -5,6 +5,9 @@ kind: Kustomization
 resources:
   - deployment.yaml
   - service.yaml
+  - service-monitor.yaml
+  - pvc.yaml
+  - kafka-topic.yaml
 
 generators:
   - configmap-generator.yaml

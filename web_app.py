@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import traceback
 import hashlib
 from datetime import datetime, timezone
@@ -12,13 +13,20 @@ from urllib.parse import urlsplit
 
 import pandas as pd
 from dotenv import load_dotenv
-from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask import Flask, Response, jsonify, redirect, render_template, request, url_for
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
 
+import read_model
 import splitwise_to_excel as core
 
 
 def should_load_dotenv() -> bool:
     raw = (os.getenv("SPLITWISE_LOAD_DOTENV", "1") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def should_eager_initialize() -> bool:
+    raw = (os.getenv("SPLITWISE_EAGER_INIT", "1") or "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
 
@@ -31,8 +39,8 @@ def load_runtime_env() -> None:
 
 def resolve_app_version() -> str:
     return (
-        (os.getenv("APP_VERSION") or "").strip()
-        or (os.getenv("EXPORT_VERSION") or "").strip()
+        core.getenv_text("APP_VERSION")
+        or core.getenv_text("EXPORT_VERSION")
         or "unknown"
     )
 
@@ -42,6 +50,16 @@ load_runtime_env()
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def iso_to_unix(value: Optional[str]) -> float:
+    raw = (value or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return datetime.fromisoformat(raw).timestamp()
+    except ValueError:
+        return 0.0
 
 
 def int_env(name: str, default: int, minimum: int = 1) -> int:
@@ -69,6 +87,70 @@ def coerce_float(value: Any) -> float:
 
 def format_ils(value: Any) -> str:
     return f"\u20aa{coerce_float(value):,.2f}"
+
+
+WEB_SNAPSHOT_EXPENSE_COUNT = Gauge(
+    "splitwise_web_snapshot_expense_count",
+    "Number of expense rows in the current dashboard snapshot.",
+)
+WEB_SNAPSHOT_LAST_GENERATED_UNIX = Gauge(
+    "splitwise_web_snapshot_last_generated_unixtime",
+    "Unix timestamp of the latest dashboard snapshot.",
+)
+WEB_PENDING_REFRESH_REQUESTS = Gauge(
+    "splitwise_web_pending_refresh_requests",
+    "Pending manual refresh requests stored in the read model.",
+)
+
+# Business metrics
+WEB_TOTAL_EXPENSE_AMOUNT = Gauge(
+    "splitwise_total_expense_amount",
+    "Total sum of all tracked expense amounts.",
+)
+WEB_TRACKED_MONTHS = Gauge(
+    "splitwise_tracked_months_total",
+    "Number of months tracked in the current snapshot.",
+)
+WEB_MEMBER_OWES = Gauge(
+    "splitwise_member_owes",
+    "Total amount a member owes across all tracked expenses.",
+    ["member"],
+)
+WEB_MEMBER_RECEIVES = Gauge(
+    "splitwise_member_receives",
+    "Total amount a member is owed across all tracked expenses.",
+    ["member"],
+)
+
+# Operational metrics
+WEB_REFRESH_DURATION = Gauge(
+    "splitwise_refresh_duration_seconds",
+    "Duration of the last completed data refresh in seconds.",
+)
+WEB_REFRESH_ERRORS = Counter(
+    "splitwise_refresh_errors_total",
+    "Number of failed Splitwise data refresh attempts.",
+)
+
+
+def update_web_metrics(model: Dict[str, Any]) -> None:
+    snapshot = model.get("snapshot")
+    if snapshot is None:
+        WEB_SNAPSHOT_EXPENSE_COUNT.set(0)
+        WEB_SNAPSHOT_LAST_GENERATED_UNIX.set(0)
+        WEB_TOTAL_EXPENSE_AMOUNT.set(0)
+        WEB_TRACKED_MONTHS.set(0)
+    else:
+        summary = snapshot.get("summary", {})
+        WEB_SNAPSHOT_EXPENSE_COUNT.set(int(summary.get("expense_count") or 0))
+        WEB_SNAPSHOT_LAST_GENERATED_UNIX.set(iso_to_unix(snapshot.get("generated_at")))
+        WEB_TOTAL_EXPENSE_AMOUNT.set(float(summary.get("total_expenses") or 0))
+        WEB_TRACKED_MONTHS.set(len(snapshot.get("months") or []))
+        for balance in snapshot.get("member_balances") or []:
+            member = str(balance.get("name") or "unknown")
+            WEB_MEMBER_OWES.labels(member=member).set(float(balance.get("owes") or 0))
+            WEB_MEMBER_RECEIVES.labels(member=member).set(float(balance.get("to_receive") or 0))
+    WEB_PENDING_REFRESH_REQUESTS.set(int(model.get("pending_refresh_count") or 0))
 
 
 def resolve_user_id(value: Any) -> Optional[int]:
@@ -115,9 +197,9 @@ def extract_simplified_debts(group) -> List[Any]:
 
 
 def debt_direction_mode() -> str:
-    mode = (os.getenv("SPLITWISE_DEBT_DIRECTION", "reverse") or "reverse").strip().lower()
+    mode = (os.getenv("SPLITWISE_DEBT_DIRECTION", "normal") or "normal").strip().lower()
     if mode not in {"normal", "reverse"}:
-        return "reverse"
+        return "normal"
     return mode
 
 
@@ -128,7 +210,7 @@ def person_owes_direction_mode() -> str:
         or debt_direction_mode()
     )
     if mode not in {"normal", "reverse"}:
-        return "reverse"
+        return "normal"
     return mode
 
 
@@ -302,46 +384,22 @@ def build_raw_with_member_owes(
     return out
 
 
-def build_dashboard_snapshot(max_recent_rows: int) -> Dict[str, Any]:
-    core.refresh_runtime_config(load_env=False, require_members=False)
-    if not core.MEMBER_ID_TO_NAME:
-        raise RuntimeError("SPLITWISE_MEMBERS is required.")
-
-    group_id = core.DEFAULT_GROUP_ID or int(os.getenv("SPLITWISE_GROUP_ID", "0") or "0")
-    if not group_id:
-        raise RuntimeError("SPLITWISE_GROUP_ID is required.")
-
-    client_id = (os.getenv("SPLITWISE_CLIENT_ID") or "").strip()
-    client_secret = (os.getenv("SPLITWISE_CLIENT_SECRET") or "").strip()
-    token_raw = os.getenv("SPLITWISE_ACCESS_TOKEN_JSON")
-    if not client_id or not client_secret or not token_raw:
-        raise RuntimeError(
-            "Missing credentials: SPLITWISE_CLIENT_ID, SPLITWISE_CLIENT_SECRET, SPLITWISE_ACCESS_TOKEN_JSON."
-        )
-
-    start_ym = (os.getenv("SPLITWISE_FIRST_MONTH", core.FIRST_MONTH) or "2008-01").strip()
-    end_ym = core.ym_today()
-    try:
-        token = core.resolve_token(token_raw)
-    except SystemExit as exc:
-        raise RuntimeError(str(exc)) from exc
-
-    try:
-        sw = core.make_client(client_id, client_secret, token)
-    except SystemExit as exc:
-        raise RuntimeError(str(exc)) from exc
-    group = core.fetch_group(sw, group_id)
-    group_name = group.getName()
-
-    expenses = core.fetch_expenses_all_history(sw, group_id, start_ym, end_ym)
-    raw_df = core.normalize_expenses(expenses)
-    shares_df = core.normalize_person_shares(expenses)
-    raw_df, shares_df = core.apply_custom_exclusions(raw_df, shares_df)
+def build_snapshot_from_frames(
+    *,
+    group_id: int,
+    group_name: str,
+    generated_at: str,
+    start_ym: str,
+    end_ym: str,
+    raw_df: pd.DataFrame,
+    shares_df: pd.DataFrame,
+    debt_edges: List[Dict[str, Any]],
+    max_recent_rows: int,
+) -> Dict[str, Any]:
     raw_wide = build_raw_with_member_owes(raw_df, shares_df, core.MEMBER_ID_TO_NAME)
     monthly_by_category, _ = core.build_pivots(raw_wide)
     per_person_month = build_person_month_owes_pivot(shares_df, core.MEMBER_ID_TO_NAME)
 
-    debt_edges = build_debt_edges(group, core.MEMBER_ID_TO_NAME)
     member_names = list(core.MEMBER_ID_TO_NAME.values())
     member_owes: Dict[str, float] = {name: 0.0 for name in member_names}
     member_receives: Dict[str, float] = {name: 0.0 for name in member_names}
@@ -471,7 +529,7 @@ def build_dashboard_snapshot(max_recent_rows: int) -> Dict[str, Any]:
     return {
         "group_id": group_id,
         "group_name": group_name,
-        "generated_at": utc_now_iso(),
+        "generated_at": generated_at,
         "months": months,
         "range": {"start_month": start_ym, "end_month": end_ym},
         "summary": {
@@ -497,6 +555,55 @@ def build_dashboard_snapshot(max_recent_rows: int) -> Dict[str, Any]:
             "per_person_month": dataframe_to_table(per_person_month, include_index=True),
         },
     }
+
+
+def build_dashboard_snapshot(max_recent_rows: int) -> Dict[str, Any]:
+    core.refresh_runtime_config(load_env=False, require_members=False)
+    if not core.MEMBER_ID_TO_NAME:
+        raise RuntimeError("SPLITWISE_MEMBERS is required.")
+
+    group_id = core.DEFAULT_GROUP_ID or int(core.getenv_text("SPLITWISE_GROUP_ID", "0") or "0")
+    if not group_id:
+        raise RuntimeError("SPLITWISE_GROUP_ID is required.")
+
+    client_id = core.getenv_text("SPLITWISE_CLIENT_ID")
+    client_secret = core.getenv_text("SPLITWISE_CLIENT_SECRET")
+    token_raw = core.getenv_text("SPLITWISE_ACCESS_TOKEN_JSON")
+    if not client_id or not client_secret or not token_raw:
+        raise RuntimeError(
+            "Missing credentials: SPLITWISE_CLIENT_ID, SPLITWISE_CLIENT_SECRET, SPLITWISE_ACCESS_TOKEN_JSON."
+        )
+
+    start_ym = core.getenv_text("SPLITWISE_FIRST_MONTH", core.FIRST_MONTH) or "2008-01"
+    end_ym = core.ym_today()
+    try:
+        token = core.resolve_token(token_raw)
+    except SystemExit as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    try:
+        sw = core.make_client(client_id, client_secret, token)
+    except SystemExit as exc:
+        raise RuntimeError(str(exc)) from exc
+    group = core.fetch_group(sw, group_id)
+    group_name = group.getName()
+
+    expenses = core.fetch_expenses_all_history(sw, group_id, start_ym, end_ym)
+    raw_df = core.normalize_expenses(expenses)
+    shares_df = core.normalize_person_shares(expenses)
+    raw_df, shares_df = core.apply_custom_exclusions(raw_df, shares_df)
+    debt_edges = build_debt_edges(group, core.MEMBER_ID_TO_NAME)
+    return build_snapshot_from_frames(
+        group_id=group_id,
+        group_name=group_name,
+        generated_at=utc_now_iso(),
+        start_ym=start_ym,
+        end_ym=end_ym,
+        raw_df=raw_df,
+        shares_df=shares_df,
+        debt_edges=debt_edges,
+        max_recent_rows=max_recent_rows,
+    )
 
 
 def normalize_month_filter(snapshot: Dict[str, Any], selected_month: str) -> str:
@@ -744,15 +851,18 @@ class DashboardState:
 
         snapshot: Optional[Dict[str, Any]] = None
         error: Optional[str] = None
+        t0 = time.monotonic()
         try:
             snapshot = build_dashboard_snapshot(self.max_recent_rows)
         except Exception as exc:
             error = f"{exc.__class__.__name__}: {exc}"
             traceback.print_exc()
+            WEB_REFRESH_ERRORS.inc()
 
         with self._lock:
             if snapshot is not None:
                 self._snapshot = snapshot
+                WEB_REFRESH_DURATION.set(time.monotonic() - t0)
             self._last_error = error
             self._last_refresh_finished = utc_now_iso()
             self._refresh_in_progress = False
@@ -780,7 +890,7 @@ class DashboardState:
         elif refresh_in_progress:
             status = "refreshing"
 
-        return {
+        model = {
             "status": status,
             "refresh_in_progress": refresh_in_progress,
             "refresh_seconds": self.refresh_seconds,
@@ -788,7 +898,89 @@ class DashboardState:
             "last_refresh_finished": last_refresh_finished,
             "last_error": last_error,
             "snapshot": snapshot,
+            "pending_refresh_count": 0,
         }
+        update_web_metrics(model)
+        return model
+
+
+class ReadModelState:
+    def __init__(self, refresh_seconds: int, max_recent_rows: int):
+        self.refresh_seconds = refresh_seconds
+        self.max_recent_rows = max_recent_rows
+
+    def start(self) -> None:
+        read_model.initialize_db()
+
+    def trigger_refresh_async(self) -> bool:
+        read_model.record_refresh_request(source="web")
+        return True
+
+    def model(self) -> Dict[str, Any]:
+        core.refresh_runtime_config(load_env=False, require_members=False)
+        materialized = read_model.load_materialized_state()
+        snapshot = None
+        if core.MEMBER_ID_TO_NAME and (
+            materialized["group_id"]
+            or not materialized["raw_df"].empty
+            or not materialized["shares_df"].empty
+        ):
+            snapshot = build_snapshot_from_frames(
+                group_id=int(materialized["group_id"]),
+                group_name=str(materialized["group_name"] or ""),
+                generated_at=str(materialized["generated_at"] or utc_now_iso()),
+                start_ym=str(materialized["range"].get("start_month") or core.FIRST_MONTH),
+                end_ym=str(materialized["range"].get("end_month") or core.ym_today()),
+                raw_df=materialized["raw_df"],
+                shares_df=materialized["shares_df"],
+                debt_edges=list(materialized["debt_edges"]),
+                max_recent_rows=self.max_recent_rows,
+            )
+
+        producer_state = materialized["producer_state"]
+        consumer_state = materialized["consumer_state"]
+        last_error = (
+            str(consumer_state.get("last_error") or "").strip()
+            or str(producer_state.get("last_error") or "").strip()
+            or None
+        )
+        refresh_in_progress = bool(producer_state.get("refresh_in_progress"))
+        if snapshot is None and refresh_in_progress:
+            status = "warming_up"
+        elif snapshot is None and last_error:
+            status = "error"
+        elif snapshot is None:
+            status = "warming_up"
+        elif refresh_in_progress:
+            status = "refreshing"
+        else:
+            status = "ready"
+
+        model = {
+            "status": status,
+            "refresh_in_progress": refresh_in_progress,
+            "refresh_seconds": self.refresh_seconds,
+            "last_refresh_started": producer_state.get("last_refresh_started"),
+            "last_refresh_finished": (
+                producer_state.get("last_successful_refresh")
+                or producer_state.get("last_refresh_finished")
+                or materialized.get("generated_at")
+            ),
+            "last_error": last_error,
+            "snapshot": snapshot,
+            "pending_refresh_count": int(materialized.get("pending_refresh_count") or 0),
+        }
+        update_web_metrics(model)
+        return model
+
+
+def snapshot_backend_mode() -> str:
+    explicit = (os.getenv("SPLITWISE_SNAPSHOT_BACKEND") or "").strip().lower()
+    if explicit in {"direct", "read_model"}:
+        return explicit
+    if (os.getenv("KAFKA_BOOTSTRAP_SERVERS") or "").strip():
+        return "read_model"
+    return "direct"
 
 
 REFRESH_SECONDS = int_env("SPLITWISE_REFRESH_SECONDS", default=900, minimum=30)
@@ -797,16 +989,31 @@ TABLE_LIMIT = int_env("SPLITWISE_TABLE_LIMIT", default=500, minimum=50)
 APP_VERSION = resolve_app_version()
 
 _state_lock = threading.Lock()
-_state: Optional[DashboardState] = None
+_state: Optional[Any] = None
 
 
-def get_state() -> DashboardState:
+def get_state() -> Any:
     global _state
     with _state_lock:
         if _state is None:
-            _state = DashboardState(refresh_seconds=REFRESH_SECONDS, max_recent_rows=MAX_RECENT_ROWS)
+            if snapshot_backend_mode() == "read_model":
+                _state = ReadModelState(refresh_seconds=REFRESH_SECONDS, max_recent_rows=MAX_RECENT_ROWS)
+            else:
+                _state = DashboardState(refresh_seconds=REFRESH_SECONDS, max_recent_rows=MAX_RECENT_ROWS)
             _state.start()
         return _state
+
+
+def log_web_startup() -> None:
+    print(
+        "[splitwise-web] "
+        f"backend={snapshot_backend_mode()} "
+        f"refresh_seconds={REFRESH_SECONDS} "
+        f"max_recent_rows={MAX_RECENT_ROWS} "
+        f"table_limit={TABLE_LIMIT} "
+        f"eager_init={should_eager_initialize()} "
+        f"version={APP_VERSION}"
+    )
 
 app = Flask(__name__)
 
@@ -886,6 +1093,11 @@ def api_refresh():
     return jsonify({"scheduled": scheduled, "timestamp": utc_now_iso()}), (202 if scheduled else 409)
 
 
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
+
+
 @app.get("/healthz")
 def healthz():
     return jsonify({"status": "ok", "time": utc_now_iso()})
@@ -899,8 +1111,12 @@ def readyz():
     return jsonify({"status": "ready", "last_refresh_finished": model["last_refresh_finished"]})
 
 
-if __name__ == "__main__":
+log_web_startup()
+if should_eager_initialize():
     get_state()
+
+
+if __name__ == "__main__":
     host = os.getenv("SPLITWISE_APP_HOST", "0.0.0.0").strip() or "0.0.0.0"
     port = int_env("PORT", default=8080, minimum=1)
     app.run(host=host, port=port)

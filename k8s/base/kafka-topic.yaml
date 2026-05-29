@@ -1,0 +1,13 @@
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: splitwise-expenses-v1
+  labels:
+    strimzi.io/cluster: splitwise-kafka
+spec:
+  topicName: splitwise.expenses.v1
+  partitions: 3
+  replicas: 2
+  config:
+    retention.ms: "604800000"
+    cleanup.policy: delete

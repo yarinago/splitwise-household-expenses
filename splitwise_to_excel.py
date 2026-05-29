@@ -66,8 +66,19 @@ OUTPUT_FILE_TEMPLATE = "splitwise_group_{group_id}_all_history.xlsx"
 MEMBER_ID_TO_NAME: Dict[int, str] = {}
 
 
+def _normalize_env_text(raw: Optional[str]) -> str:
+    value = (raw or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1].strip()
+    return value
+
+
+def getenv_text(name: str, default: str = "") -> str:
+    return _normalize_env_text(os.getenv(name, default))
+
+
 def _parse_int_env(name: str, default: int = 0) -> int:
-    raw = (os.getenv(name) or "").strip()
+    raw = getenv_text(name)
     if not raw:
         return default
     try:
@@ -77,7 +88,7 @@ def _parse_int_env(name: str, default: int = 0) -> int:
 
 # Members mapping (id -> display name), loaded from env or CLI
 def _load_members(required: bool = True) -> Dict[int, str]:
-    members_json = (os.getenv("SPLITWISE_MEMBERS") or "").strip()
+    members_json = getenv_text("SPLITWISE_MEMBERS")
     if not members_json:
         if required:
             raise SystemExit(
@@ -107,13 +118,13 @@ def refresh_runtime_config(load_env: bool = False, require_members: bool = False
         load_dotenv()
 
     DEFAULT_GROUP_ID = _parse_int_env("SPLITWISE_GROUP_ID", default=0)
-    FIRST_MONTH = (os.getenv("SPLITWISE_FIRST_MONTH") or "2008-01").strip() or "2008-01"
+    FIRST_MONTH = getenv_text("SPLITWISE_FIRST_MONTH", "2008-01") or "2008-01"
     default_template = (
         f"splitwise_group_{DEFAULT_GROUP_ID}_all_history.xlsx"
         if DEFAULT_GROUP_ID
         else "splitwise_group_{group_id}_all_history.xlsx"
     )
-    OUTPUT_FILE_TEMPLATE = (os.getenv("SPLITWISE_OUTPUT_FILE") or default_template).strip() or default_template
+    OUTPUT_FILE_TEMPLATE = getenv_text("SPLITWISE_OUTPUT_FILE", default_template) or default_template
     MEMBER_ID_TO_NAME = _load_members(required=require_members)
 
 
@@ -291,6 +302,21 @@ def fetch_expenses_all_history(sw: Splitwise, group_id: int, start_ym: str, end_
             offset += len(chunk)
             if len(chunk) < 20:
                 break
+    return expenses
+
+
+def fetch_expenses_updated_after(sw: Splitwise, group_id: int, updated_after_iso: str) -> list:
+    """Fetch all expenses (including deleted) updated after the given ISO timestamp."""
+    expenses = []
+    offset = 0
+    while True:
+        chunk = sw.getExpenses(group_id=group_id, updated_after=updated_after_iso, offset=offset)
+        if not chunk:
+            break
+        expenses.extend(chunk)
+        offset += len(chunk)
+        if len(chunk) < 20:
+            break
     return expenses
 
 
@@ -539,8 +565,8 @@ def apply_custom_exclusions(raw_df: pd.DataFrame, shares_df: pd.DataFrame) -> Tu
         return raw_df, shares_df
 
     # Parse exclusion rules from environment
-    exclude_months_str = os.getenv("SPLITWISE_EXCLUDE_MONTHS", "").strip()
-    exclude_descs_str = os.getenv("SPLITWISE_EXCLUDE_DESCRIPTIONS", "").strip()
+    exclude_months_str = getenv_text("SPLITWISE_EXCLUDE_MONTHS")
+    exclude_descs_str = getenv_text("SPLITWISE_EXCLUDE_DESCRIPTIONS")
 
     if not exclude_months_str or not exclude_descs_str:
         # No exclusions configured
@@ -1130,7 +1156,7 @@ def parse_args() -> argparse.Namespace:
 def resolve_token(token_arg: Optional[str]) -> Dict:
     if not token_arg:
         raise SystemExit("[!] Provide OAuth token JSON via SPLITWISE_ACCESS_TOKEN_JSON (GitHub Secret)")
-    token_arg = token_arg.strip()
+    token_arg = _normalize_env_text(token_arg)
     if token_arg.startswith("@"):
         path = token_arg[1:]
         with open(path, "r", encoding="utf-8") as f:
@@ -1190,7 +1216,7 @@ def publish_github_actions_outputs(group_name: str, group_id: int, out_path: str
 
 
 def send_export_email_if_configured(out_path: str, group_name: str, group_id: int, version_label: str) -> None:
-    send_to_raw = os.getenv("SEND_TO_EMAIL", "").strip()
+    send_to_raw = getenv_text("SEND_TO_EMAIL")
     if not send_to_raw:
         return
 
@@ -1198,20 +1224,20 @@ def send_export_email_if_configured(out_path: str, group_name: str, group_id: in
     if not recipients:
         raise SystemExit("[!] SEND_TO_EMAIL was provided but no valid recipients were found.")
 
-    email_from = os.getenv("EMAIL_FROM", "").strip()
-    email_password = os.getenv("EMAIL_PASSWORD", "").strip()
+    email_from = getenv_text("EMAIL_FROM")
+    email_password = getenv_text("EMAIL_PASSWORD")
     if not email_from or not email_password:
         raise SystemExit("[!] SEND_TO_EMAIL is set but EMAIL_FROM or EMAIL_PASSWORD is missing.")
 
-    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com").strip() or "smtp.gmail.com"
-    smtp_port_raw = os.getenv("SMTP_PORT", "587").strip() or "587"
+    smtp_server = getenv_text("SMTP_SERVER", "smtp.gmail.com") or "smtp.gmail.com"
+    smtp_port_raw = getenv_text("SMTP_PORT", "587") or "587"
     try:
         smtp_port = int(smtp_port_raw)
     except ValueError:
         raise SystemExit(f"[!] Invalid SMTP_PORT value: {smtp_port_raw}")
 
-    subject = os.getenv("EMAIL_SUBJECT", f"Splitwise Export v{version_label} - {group_name}")
-    body = os.getenv(
+    subject = getenv_text("EMAIL_SUBJECT", f"Splitwise Export v{version_label} - {group_name}")
+    body = getenv_text(
         "EMAIL_BODY",
         (
             f'Splitwise household expenses export for group "{group_name}" (ID: {group_id}).\n'
@@ -1258,13 +1284,13 @@ def main():
     group_id = args.group_id or DEFAULT_GROUP_ID
     start_ym = args.start or FIRST_MONTH
     end_ym = args.end or ym_today()
-    version_label = _normalize_version_label(os.getenv("EXPORT_VERSION", "unknown"))
+    version_label = _normalize_version_label(getenv_text("EXPORT_VERSION", "unknown"))
     out_path_raw = args.out or OUTPUT_FILE_TEMPLATE.format(group_id=group_id)
     out_path = _append_version_to_filename(out_path_raw, version_label)
 
-    client_id = os.getenv("SPLITWISE_CLIENT_ID")
-    client_secret = os.getenv("SPLITWISE_CLIENT_SECRET")
-    token_json_raw = os.getenv("SPLITWISE_ACCESS_TOKEN_JSON")
+    client_id = getenv_text("SPLITWISE_CLIENT_ID")
+    client_secret = getenv_text("SPLITWISE_CLIENT_SECRET")
+    token_json_raw = getenv_text("SPLITWISE_ACCESS_TOKEN_JSON")
     if not client_id or not client_secret:
         raise SystemExit("[!] Missing SPLITWISE_CLIENT_ID or SPLITWISE_CLIENT_SECRET (set as GitHub Secrets).")
     token = resolve_token(token_json_raw)

@@ -17,6 +17,7 @@ The container image is generic. Every user must provide their own Splitwise cred
 - [Local Run](#local-run)
 - [Run With Docker Image](#run-with-docker-image)
 - [Background Compute Model](#background-compute-model)
+- [Kafka Runtime Modes](#kafka-runtime-modes)
 - [CI Image Build](#ci-image-build)
 - [Kubernetes Layout](#kubernetes-layout)
 - [Argo CD: App-Of-Apps](#argo-cd-app-of-apps)
@@ -165,7 +166,7 @@ SPLITWISE_FIRST_MONTH=2008-01
 SPLITWISE_EXCLUDE_MONTHS=
 SPLITWISE_EXCLUDE_DESCRIPTIONS=
 SPLITWISE_REFRESH_SECONDS=900
-SPLITWISE_DEBT_DIRECTION=reverse
+SPLITWISE_DEBT_DIRECTION=normal
 APP_VERSION=local
 SPLITWISE_LOAD_DOTENV=1
 PORT=8080
@@ -246,7 +247,7 @@ docker run --rm -p 8080:8080 \
   -e SPLITWISE_GROUP_ID="12345678" \
   -e SPLITWISE_MEMBERS='{"11111111":"Alice","22222222":"Bob"}' \
   -e SPLITWISE_FIRST_MONTH="2008-01" \
-  -e SPLITWISE_DEBT_DIRECTION="reverse" \
+  -e SPLITWISE_DEBT_DIRECTION="normal" \
   -e PORT="8080" \
   ghcr.io/yarinago/splitwise-household-expenses:latest
 ```
@@ -288,6 +289,50 @@ Optional runtime variables:
 - Category bars use distinct colors.
 - A subtle version marker is shown in the UI header (`APP_VERSION`, fallback `EXPORT_VERSION`).
 - Tables and full-data summary are split into a dedicated `/tables` page with month and text filters.
+
+## Kafka Runtime Modes
+
+The image now supports multiple runtime modes through `APP_MODE`:
+
+- `web`: serves the Flask/Gunicorn dashboard
+- `producer`: polls Splitwise and publishes Kafka events keyed by `expense_id`
+- `consumer`: consumes Kafka events with a stable consumer group and materializes a local read model
+- `loadgen`: produces synthetic `loadgen_probe` messages to create Kafka load without changing dashboard data
+
+Kafka-specific environment variables:
+
+- `KAFKA_BOOTSTRAP_SERVERS`
+- `KAFKA_TOPIC` (default `splitwise.expenses.v1`)
+- `KAFKA_GROUP_ID` (default `splitwise-dashboard-materializer`)
+- `KAFKA_AUTO_OFFSET_RESET` (default `earliest`)
+- optional auth/TLS vars:
+  - `KAFKA_SECURITY_PROTOCOL`
+  - `KAFKA_SASL_MECHANISM`
+  - `KAFKA_SASL_USERNAME`
+  - `KAFKA_SASL_PASSWORD`
+  - `KAFKA_SSL_CA_LOCATION`
+
+Read-model settings:
+
+- `SPLITWISE_SNAPSHOT_BACKEND=direct|read_model`
+- `SPLITWISE_READ_MODEL_DB` (default `/tmp/splitwise-read-model.db`)
+
+Behavior:
+
+- `producer` publishes `expense_upsert`, `expense_delete`, and `group_state` events.
+- `consumer` commits offsets only after the SQLite materialization succeeds.
+- `web` can keep the legacy direct-refresh path (`direct`) or read from the Kafka materialized SQLite model (`read_model`).
+- `POST /refresh` in `read_model` mode writes a refresh request into the shared SQLite store for the producer to pick up.
+
+Operational note:
+
+- The Strimzi operator, Kafka cluster, `KafkaTopic`, `KafkaUser`, and Kafka Exporter should live in the Argo CD repo as planned.
+- In this repo, the materialized read model is SQLite for simplicity. If `web` and `consumer` run as separate pods, they need a shared writable volume via `SPLITWISE_READ_MODEL_DB`, or this should be replaced later with an external database.
+
+Prometheus metrics:
+
+- `web` exposes `/metrics`
+- `producer`, `consumer`, and `loadgen` expose Prometheus metrics on `METRICS_PORT` (default `9090`)
 
 ## CI Image Build
 
