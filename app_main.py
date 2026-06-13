@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
 import kafka_runtime
+
+
+def _configure_logging() -> None:
+    level_name = (os.getenv("LOG_LEVEL") or "INFO").strip().upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+        stream=sys.stdout,
+    )
 
 
 def _int_env(name: str, default: int) -> int:
@@ -37,6 +49,7 @@ def _exec_gunicorn() -> None:
 
 
 def main() -> None:
+    _configure_logging()
     mode = (os.getenv("APP_MODE") or "web").strip().lower()
     if mode == "web":
         _exec_gunicorn()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -18,6 +19,8 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_late
 
 import read_model
 import splitwise_to_excel as core
+
+logger = logging.getLogger(__name__)
 
 
 def should_load_dotenv() -> bool:
@@ -1005,14 +1008,11 @@ def get_state() -> Any:
 
 
 def log_web_startup() -> None:
-    print(
-        "[splitwise-web] "
-        f"backend={snapshot_backend_mode()} "
-        f"refresh_seconds={REFRESH_SECONDS} "
-        f"max_recent_rows={MAX_RECENT_ROWS} "
-        f"table_limit={TABLE_LIMIT} "
-        f"eager_init={should_eager_initialize()} "
-        f"version={APP_VERSION}"
+    logger.info(
+        "splitwise-web starting: backend=%s refresh_seconds=%s max_recent_rows=%s "
+        "table_limit=%s eager_init=%s version=%s",
+        snapshot_backend_mode(), REFRESH_SECONDS, MAX_RECENT_ROWS,
+        TABLE_LIMIT, should_eager_initialize(), APP_VERSION,
     )
 
 app = Flask(__name__)

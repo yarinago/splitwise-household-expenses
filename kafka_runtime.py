@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import socket
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 import pandas as pd
 from prometheus_client import Counter, Gauge, start_http_server
@@ -22,6 +25,7 @@ except Exception as exc:  # pragma: no cover - import error surfaced at runtime
     KafkaError = None  # type: ignore[assignment]
     Producer = None  # type: ignore[assignment]
     _IMPORT_ERROR = exc
+    logger.warning("confluent_kafka not available: %s", exc)
 else:
     _IMPORT_ERROR = None
 
@@ -278,6 +282,9 @@ def _shares_for_expense(shares_df: pd.DataFrame, expense_id: int) -> List[Dict[s
 
 def _expense_event_payload(row: pd.Series, shares_df: pd.DataFrame, group_id: int, action_type: str = "CREATE") -> Dict[str, Any]:
     expense_id = int(row["expense_id"])
+    category = str(row.get("category") or "")
+    if not category:
+        logger.warning("expense_id=%d has no category (description=%r)", expense_id, str(row.get("description") or ""))
     payload = {
         "schema_version": 1,
         "event_type": "expense_upsert",
@@ -290,7 +297,7 @@ def _expense_event_payload(row: pd.Series, shares_df: pd.DataFrame, group_id: in
             "updated_at": str(row.get("updated_at") or ""),
             "month": str(row.get("month") or ""),
             "description": str(row.get("description") or ""),
-            "category": str(row.get("category") or ""),
+            "category": category,
             "amount": round(float(core._coerce_float(row.get("amount"), 0.0)), 2),
             "currency": str(row.get("currency") or ""),
         },
@@ -400,7 +407,10 @@ def _send_messages(messages: Iterable[Tuple[str, Dict[str, Any]]]) -> Dict[str, 
 
     def on_delivery(err: Any, msg: Any) -> None:
         if err is not None:
+            logger.error("Kafka delivery failure for key=%s: %s", msg.key(), err)
             failures.append(str(err))
+        else:
+            logger.debug("Delivered key=%s to %s [%d] offset=%d", msg.key(), msg.topic(), msg.partition(), msg.offset())
 
     queued = 0
     for key, payload in messages:
@@ -418,6 +428,7 @@ def _send_messages(messages: Iterable[Tuple[str, Dict[str, Any]]]) -> Dict[str, 
     if queued == 0:
         return counts
 
+    logger.debug("Flushing %d queued message(s) to topic=%s", queued, topic)
     remaining = producer.flush(timeout=_read_float_env("KAFKA_FLUSH_TIMEOUT_SECONDS", default=30.0, minimum=1.0))
     if remaining:
         failures.append(f"{remaining} message(s) remained in producer queue after flush.")
@@ -437,10 +448,12 @@ def _set_consumer_state(key: str, value: Any) -> None:
 
 
 def run_producer_once() -> Dict[str, int]:
+    logger.info("Producer full-fetch started")
     dataset = _fetch_splitwise_dataset()
     raw_df: pd.DataFrame = dataset["raw_df"]
     shares_df: pd.DataFrame = dataset["shares_df"]
     group_id = int(dataset["group_id"])
+    logger.info("Fetched %d expenses for group_id=%d", len(raw_df), group_id)
 
     published_hashes = read_model.load_published_entity_hashes("expense")
     current_ids: set[str] = set()
@@ -478,7 +491,14 @@ def run_producer_once() -> Dict[str, int]:
         )
     )
 
+    logger.info(
+        "Producing %d message(s): %d upsert(s), %d delete(s), 1 group_state",
+        len(messages),
+        len(messages) - len(stale_ids) - 1,
+        len(stale_ids),
+    )
     counts = _send_messages(messages)
+    logger.info("Producer full-fetch complete: %s", counts)
     for entity_key, payload_hash in updated_hashes.items():
         read_model.set_published_entity_hash("expense", entity_key, payload_hash)
     for stale_id in stale_ids:
@@ -489,9 +509,10 @@ def run_producer_once() -> Dict[str, int]:
 
 
 def _run_producer_incremental(updated_after_iso: str) -> Dict[str, int]:
-    """Fetch only expenses changed since updated_after_iso and emit one event per change."""
+    logger.info("Producer incremental-fetch started (updated_after=%s)", updated_after_iso)
     sw, group_id, group = _splitwise_connect()
     raw_expenses = core.fetch_expenses_updated_after(sw, group_id, updated_after_iso)
+    logger.info("Incremental fetch returned %d raw expense(s)", len(raw_expenses))
 
     messages: List[Tuple[str, Dict[str, Any]]] = []
 
@@ -507,7 +528,14 @@ def _run_producer_incremental(updated_after_iso: str) -> Dict[str, int]:
             continue
 
         # Skip payments/transfers (same filter as normalize_expenses)
-        category_name = str(_safe_attr(_safe_attr(expense, "getCategory"), "getName") or "Uncategorized")
+        raw_category = _safe_attr(_safe_attr(expense, "getCategory"), "getName")
+        if not raw_category:
+            logger.warning(
+                "expense_id=%d has no category (description=%r)",
+                expense_id,
+                str(_safe_attr(expense, "getDescription") or ""),
+            )
+        category_name = str(raw_category or "Uncategorized")
         if "payment" in category_name.lower() or "transfer" in category_name.lower():
             continue
 
@@ -564,6 +592,7 @@ def _run_producer_incremental(updated_after_iso: str) -> Dict[str, int]:
     )
 
     counts = _send_messages(messages)
+    logger.info("Producer incremental-fetch complete: %s", counts)
     if messages:
         read_model.mark_refresh_requests_handled()
     return counts
@@ -572,6 +601,7 @@ def _run_producer_incremental(updated_after_iso: str) -> Dict[str, int]:
 def run_producer_loop() -> None:
     _start_metrics_server()
     refresh_seconds = _read_int_env("SPLITWISE_REFRESH_SECONDS", default=900, minimum=30)
+    logger.info("Producer loop starting (refresh_interval=%ds, metrics_port=%d)", refresh_seconds, metrics_port())
     while True:
         fetch_started_at = utc_now_iso()
         _set_producer_state("refresh_in_progress", True)
@@ -585,6 +615,7 @@ def run_producer_loop() -> None:
                 counts = run_producer_once()
         except Exception as exc:
             PRODUCER_RUNS_TOTAL.labels(status="error").inc()
+            logger.exception("Producer run failed: %s", exc)
             _set_producer_state("last_error", f"{exc.__class__.__name__}: {exc}")
             _set_producer_state("last_refresh_finished", utc_now_iso())
             _set_producer_state("refresh_in_progress", False)
@@ -598,9 +629,11 @@ def run_producer_loop() -> None:
             _set_producer_state("last_published_counts", counts)
             _set_producer_state("refresh_in_progress", False)
 
+        logger.info("Producer sleeping for up to %ds", refresh_seconds)
         deadline = time.time() + refresh_seconds
         while time.time() < deadline:
             if read_model.pending_refresh_count() > 0:
+                logger.info("Pending refresh request detected, waking producer early")
                 break
             time.sleep(1.0)
 
@@ -635,19 +668,23 @@ def run_consumer_loop() -> None:
     _start_metrics_server()
     consumer = _consumer_instance()
     topic = kafka_topic()
+    group_id = kafka_group_id()
+    logger.info("Consumer starting (topic=%s, group_id=%s, metrics_port=%d)", topic, group_id, metrics_port())
 
     def on_assign(client: Any, partitions: List[Any]) -> None:
         CONSUMER_ASSIGNED_PARTITIONS.set(len(partitions))
         _set_consumer_state("assigned_partitions", len(partitions))
+        logger.info("Consumer assigned %d partition(s): %s", len(partitions), [str(p) for p in partitions])
         client.assign(partitions)
 
     def on_revoke(client: Any, partitions: List[Any]) -> None:
         CONSUMER_ASSIGNED_PARTITIONS.set(0)
         _set_consumer_state("assigned_partitions", 0)
+        logger.warning("Consumer partitions revoked: %s", [str(p) for p in partitions])
         client.unassign()
 
     consumer.subscribe([topic], on_assign=on_assign, on_revoke=on_revoke)
-    _set_consumer_state("group_id", kafka_group_id())
+    _set_consumer_state("group_id", group_id)
     _set_consumer_state("topic", topic)
 
     poll_timeout = _read_float_env("KAFKA_CONSUMER_POLL_TIMEOUT_SECONDS", default=1.0, minimum=0.1)
@@ -667,6 +704,10 @@ def run_consumer_loop() -> None:
             event_type = _handle_consumer_event(payload, payload_hash=payload_hash)
             consumer.commit(message=msg, asynchronous=False)
 
+            logger.debug(
+                "Consumed event_type=%s topic=%s partition=%d offset=%d",
+                event_type, msg.topic(), msg.partition(), msg.offset(),
+            )
             CONSUMER_MESSAGES_TOTAL.labels(event_type=event_type).inc()
             CONSUMER_LAST_SUCCESS_UNIX.set(unix_now())
             CONSUMER_LAST_OFFSET.labels(topic=msg.topic(), partition=str(msg.partition())).set(msg.offset())
@@ -677,13 +718,16 @@ def run_consumer_loop() -> None:
             _set_consumer_state("last_processed_partition", msg.partition())
             _set_consumer_state("last_processed_offset", msg.offset())
     except Exception as exc:
+        logger.exception("Consumer loop failed: %s", exc)
         _set_consumer_state("last_error", f"{exc.__class__.__name__}: {exc}")
         raise
     except KeyboardInterrupt:
+        logger.info("Consumer shutting down (KeyboardInterrupt)")
         return
     finally:
         CONSUMER_ASSIGNED_PARTITIONS.set(0)
         consumer.close()
+        logger.info("Consumer closed")
 
 
 def run_load_generator() -> None:
@@ -695,6 +739,8 @@ def run_load_generator() -> None:
     interval = 1.0 / rate
     sequence = 0
     last_flush = time.time()
+    last_log = time.time()
+    logger.info("Load generator starting (topic=%s, rate=%.1f msg/s, payload=%d bytes)", topic, rate, payload_bytes)
     try:
         while True:
             payload = {
@@ -712,9 +758,13 @@ def run_load_generator() -> None:
             producer.poll(0)
             LOADGEN_MESSAGES_TOTAL.inc()
             sequence += 1
-            if time.time() - last_flush >= 1.0:
+            now = time.time()
+            if now - last_flush >= 1.0:
                 producer.flush(timeout=5.0)
-                last_flush = time.time()
+                last_flush = now
+            if now - last_log >= 10.0:
+                logger.info("Load generator sent %d message(s) so far", sequence)
+                last_log = now
             time.sleep(interval)
     except KeyboardInterrupt:
         pass
