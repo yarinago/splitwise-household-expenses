@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -14,10 +15,12 @@ from urllib.parse import urlsplit
 import pandas as pd
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, redirect, render_template, request, url_for
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 
 import read_model
 import splitwise_to_excel as core
+
+logger = logging.getLogger(__name__)
 
 
 def should_load_dotenv() -> bool:
@@ -130,6 +133,20 @@ WEB_REFRESH_DURATION = Gauge(
 WEB_REFRESH_ERRORS = Counter(
     "splitwise_refresh_errors_total",
     "Number of failed Splitwise data refresh attempts.",
+)
+
+# HTTP-level SLI metrics (request rate, latency, error rate) — separate from
+# the business/operational gauges above, which describe the Splitwise data
+# itself rather than how the web process is serving requests.
+WEB_HTTP_REQUESTS_TOTAL = Counter(
+    "splitwise_http_requests_total",
+    "Total HTTP requests handled by the web process.",
+    ["method", "path", "status"],
+)
+WEB_HTTP_REQUEST_DURATION = Histogram(
+    "splitwise_http_request_duration_seconds",
+    "HTTP request duration in seconds.",
+    ["method", "path"],
 )
 
 
@@ -1005,17 +1022,37 @@ def get_state() -> Any:
 
 
 def log_web_startup() -> None:
-    print(
-        "[splitwise-web] "
-        f"backend={snapshot_backend_mode()} "
-        f"refresh_seconds={REFRESH_SECONDS} "
-        f"max_recent_rows={MAX_RECENT_ROWS} "
-        f"table_limit={TABLE_LIMIT} "
-        f"eager_init={should_eager_initialize()} "
-        f"version={APP_VERSION}"
+    logger.info(
+        "splitwise-web starting: backend=%s refresh_seconds=%s max_recent_rows=%s "
+        "table_limit=%s eager_init=%s version=%s",
+        snapshot_backend_mode(), REFRESH_SECONDS, MAX_RECENT_ROWS,
+        TABLE_LIMIT, should_eager_initialize(), APP_VERSION,
     )
 
 app = Flask(__name__)
+
+
+def _request_path_template() -> str:
+    # The matched route rule, not the raw URL, so label cardinality stays
+    # bounded regardless of query strings; falls back for unmatched (404) hits.
+    rule = request.url_rule
+    return rule.rule if rule is not None else "unmatched"
+
+
+@app.before_request
+def _start_request_timer() -> None:
+    request._sli_start_time = time.monotonic()
+
+
+@app.after_request
+def _record_request_metrics(response):
+    if request.path == "/metrics":
+        return response
+    duration = time.monotonic() - getattr(request, "_sli_start_time", time.monotonic())
+    path = _request_path_template()
+    WEB_HTTP_REQUESTS_TOTAL.labels(method=request.method, path=path, status=str(response.status_code)).inc()
+    WEB_HTTP_REQUEST_DURATION.labels(method=request.method, path=path).observe(duration)
+    return response
 
 
 @app.template_filter("ils")
