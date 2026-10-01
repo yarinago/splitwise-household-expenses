@@ -274,6 +274,11 @@
         grid-template-columns: 130px 1fr 90px;
       }
     }
+
+    .blur {
+      filter: blur(6px);
+      user-select: none;
+    }
   </style>
 </head>
 <body>
@@ -286,7 +291,7 @@
           <div class="version">v{{ app_version }}</div>
           {% if snapshot %}
           <p class="meta">
-            Group: <strong>{{ snapshot.group_name }}</strong> ({{ snapshot.group_id }}) |
+            Group: <strong>{{ snapshot.group_name }}</strong> (<span class="blur">{{ snapshot.group_id }}</span>) |
             Range: {{ snapshot.range.start_month }} to {{ snapshot.range.end_month }} |
             Last dataset build: {{ snapshot.generated_at }}
           </p>
@@ -321,7 +326,7 @@
       <div class="cards">
         {% for card in view.member_balances %}
         <article class="card">
-          <h3>{{ card.name }}</h3>
+          <h3 class="blur">{{ card.name }}</h3>
           <span class="chip chip-owes">Owes: {{ card.owes | ils }}</span>
           <span class="chip chip-receive">To receive: {{ card.to_receive | ils }}</span>
         </article>
@@ -401,7 +406,7 @@
             <div class="month-title">{{ month_group.month }}</div>
             {% for person_row in month_group.people %}
             <div class="bar-row">
-              <div class="label">{{ person_row.name }}</div>
+              <div class="label blur">{{ person_row.name }}</div>
               <div class="track"><div class="fill" style="width: {{ person_row.pct }}%; background: {{ person_row.color }};"></div></div>
               <div class="value">{{ person_row.amount | ils }}</div>
             </div>
