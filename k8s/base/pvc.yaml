@@ -1,10 +1,18 @@
+# ReadWriteMany (EFS-backed, storageClassName below) instead of the
+# original ReadWriteOnce (EBS) -- an RWO, single-attach volume meant the
+# Deployment's RollingUpdate deadlocked on every deploy: the new pod needs
+# this mounted to reach Ready, but Kubernetes won't detach it from the
+# still-running old pod until that old pod terminates, and the old pod
+# doesn't terminate until the new one's Ready. RWM lets both pods hold it
+# at once, so a new pod can actually come up before the old one is killed.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: splitwise-read-model-pvc
 spec:
   accessModes:
-    - ReadWriteOnce
+    - ReadWriteMany
+  storageClassName: efs-sc
   resources:
     requests:
       storage: 1Gi
