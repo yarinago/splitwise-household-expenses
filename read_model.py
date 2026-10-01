@@ -113,7 +113,17 @@ def _connect_raw() -> sqlite3.Connection:
     conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
+    # Not WAL: WAL mode needs mmap-backed shared-memory (the -shm file) to
+    # coordinate readers/writers, which network filesystems don't support
+    # reliably -- on this app's EFS-backed PVC it didn't corrupt anything,
+    # but every query against the web container hung indefinitely waiting
+    # on that coordination (timed-out /healthz checks, kubelet repeatedly
+    # killing the pod for a failed liveness probe). DELETE is SQLite's own
+    # documented recommendation for network filesystems: coarser whole-file
+    # locking instead of WAL's finer-grained scheme, which is the right
+    # trade for this app's write pattern anyway (one consumer process
+    # appending, not many concurrent writers).
+    conn.execute("PRAGMA journal_mode = DELETE")
     return conn
 
 
