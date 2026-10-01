@@ -174,11 +174,6 @@
       top: 0;
       z-index: 1;
     }
-
-    .blur {
-      filter: blur(12px);
-      user-select: none;
-    }
   </style>
 </head>
 <body>
@@ -188,7 +183,7 @@
       <thead>
         <tr>
           {% for col in table.columns %}
-          <th{% if col == 'description' or col.endswith('_owes') %} class="blur"{% endif %}>{{ col }}</th>
+          <th>{{ col }}</th>
           {% endfor %}
         </tr>
       </thead>
@@ -196,11 +191,10 @@
         {% for row in table.rows %}
         <tr>
           {% for col in table.columns %}
-          {% set cell_class = ' class="blur"' if col == 'description' or col.endswith('_owes') else '' %}
           {% if col in table.money_columns %}
-          <td{{ cell_class | safe }}>{{ row.get(col, 0) | ils }}</td>
+          <td>{{ row.get(col, 0) | ils }}</td>
           {% else %}
-          <td{{ cell_class | safe }}>{{ row.get(col, "") }}</td>
+          <td>{{ row.get(col, "") }}</td>
           {% endif %}
           {% endfor %}
         </tr>
@@ -219,7 +213,7 @@
           <div class="version">v{{ app_version }}</div>
           {% if snapshot %}
           <p class="meta">
-            Group: <strong>{{ snapshot.group_name }}</strong> (<span class="blur">{{ snapshot.group_id }}</span>) |
+            Group: <strong>{{ snapshot.group_name }}</strong> ({{ snapshot.group_id }}) |
             Last dataset build: {{ snapshot.generated_at }}
           </p>
           {% else %}
